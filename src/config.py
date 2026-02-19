@@ -4,9 +4,19 @@ Configuration settings for the PDF Catalog Extractor
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import streamlit as st
 
-# Load environment variables
+# Load environment variables (fallback for local development)
 load_dotenv()
+
+
+def _get_secret(key: str, default: str = "") -> str:
+    """Get a config value from st.secrets first, then fall back to env vars."""
+    try:
+        return str(st.secrets[key])
+    except (KeyError, FileNotFoundError):
+        return os.getenv(key, default)
+
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -20,14 +30,14 @@ for dir_path in [DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
 # API Configuration
-API_KEY = os.getenv("API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
-LLM_VISION_ENABLED = os.getenv("LLM_VISION_ENABLED", "false").lower() == "true"
+API_KEY = _get_secret("API_KEY")
+LLM_MODEL = _get_secret("LLM_MODEL", "openai/gpt-4o-mini")
+LLM_BASE_URL = _get_secret("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+LLM_VISION_ENABLED = _get_secret("LLM_VISION_ENABLED", "false").lower() == "true"
 
 # OCR Configuration
 # Options: tesseract, easyocr, paddleocr
-OCR_ENGINE = os.getenv("OCR_ENGINE", "easyocr")
+OCR_ENGINE = _get_secret("OCR_ENGINE", "easyocr")
 OCR_LANGUAGES = ["en", "fr", "de"]  # Languages for OCR
 
 # Processing Configuration
