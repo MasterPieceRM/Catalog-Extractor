@@ -481,6 +481,7 @@ class ExcelProcessor:
             data_start = header_row + 1
         else:
             # Auto-detect: first non-empty row = header, then keep ALL rows after
+            # If the candidate header row has gaps (empty cells), fall back to no-header mode
             header_found = False
             for row_idx in range(ws.nrows):
                 row_values = [self._clean_cell_value(ws.cell_value(row_idx, col_idx))
@@ -489,12 +490,29 @@ class ExcelProcessor:
                     # Skip leading empty rows
                     if all(v == '' or v is None for v in row_values):
                         continue
+                    # Check for gaps between first and last column with data
+                    # (trailing empty columns are OK — they're just extra columns)
+                    last_data_col = max((i for i, v in enumerate(row_values) if v != '' and v is not None), default=-1)
+                    if last_data_col >= 0:
+                        core_values = row_values[:last_data_col + 1]
+                        has_gap = any(v == '' or v is None for v in core_values)
+                    else:
+                        has_gap = True
+                    if has_gap:
+                        # Fall back to no-header mode
+                        headers = [f"Column_{i+1}" for i in range(num_cols)]
+                        header_found = True
+                        rows.append(row_values)  # Keep this row as data
+                        data_start = 1
+                        continue
                     headers = [
                         str(v) if v else f"Column_{i+1}" for i, v in enumerate(row_values)]
                     header_found = True
+                    data_start = 2  # xls: header is this row, data starts next
                 else:
                     rows.append(row_values)
-            data_start = 2  # xls: assume header is row 1
+            if not header_found:
+                data_start = 1
 
         headers = self._deduplicate_headers(headers)
 
@@ -551,20 +569,40 @@ class ExcelProcessor:
             data_start_excel_row = header_row + 1
         else:
             # Auto-detect: first non-empty row = header, then keep ALL rows after
+            # If the candidate header row has gaps (empty cells), fall back to no-header mode
             header_found = False
+            no_header_fallback = False
             for row_idx, row in enumerate(all_rows):
                 if not header_found:
                     # Skip leading empty rows
                     if all(cell is None or str(cell).strip() == '' for cell in row):
                         continue
                     row_values = [self._clean_cell_value(cell) for cell in row]
+                    # Check for gaps between first and last column with data
+                    # (trailing empty columns are OK — they're just extra columns)
+                    last_data_col = max((i for i, v in enumerate(row_values) if v != '' and v is not None), default=-1)
+                    if last_data_col >= 0:
+                        core_values = row_values[:last_data_col + 1]
+                        has_gap = any(v == '' or v is None for v in core_values)
+                    else:
+                        has_gap = True
+                    if has_gap:
+                        # Fall back to no-header mode
+                        headers = [f"Column_{i+1}" for i in range(num_cols or len(row))]
+                        header_found = True
+                        no_header_fallback = True
+                        rows.append(row_values)  # Keep this row as data
+                        continue
                     headers = [
                         str(v) if v else f"Column_{i+1}" for i, v in enumerate(row_values)]
                     header_excel_row = row_idx  # 0-based
                     header_found = True
                 else:
                     rows.append([self._clean_cell_value(cell) for cell in row])
-            data_start_excel_row = header_excel_row + 2  # 1-based, row after header
+            if no_header_fallback:
+                data_start_excel_row = 1  # All rows are data
+            else:
+                data_start_excel_row = header_excel_row + 2  # 1-based, row after header
 
         headers = self._deduplicate_headers(headers)
 

@@ -2301,43 +2301,42 @@ def render_excel_sidebar_content():
         )
 
         if uploaded_file:
-            # Header row selector — only show BEFORE loading
-            if not st.session_state.excel_doc:
-                st.markdown("##### 📋 Header Row")
-                header_options = ["Auto-detect", "No header", "Specific row"]
-                current_hr = st.session_state.get('excel_header_row')
-                if current_hr is None:
-                    default_idx = 0
-                elif current_hr == 0:
-                    default_idx = 1
-                else:
-                    default_idx = 2
+            # Header row selector — always available so user can change and reload
+            st.markdown("##### 📋 Header Row")
+            header_options = ["Auto-detect", "No header", "Specific row"]
+            current_hr = st.session_state.get('excel_header_row')
+            if current_hr is None:
+                default_idx = 0
+            elif current_hr == 0:
+                default_idx = 1
+            else:
+                default_idx = 2
 
-                header_choice = st.radio(
-                    "Header row mode",
-                    header_options,
-                    index=default_idx,
-                    key="excel_header_mode",
-                    label_visibility="collapsed",
-                    help="Auto-detect uses the first non-empty row as headers. 'No header' generates Column_1, Column_2, etc.",
-                    horizontal=True
+            header_choice = st.radio(
+                "Header row mode",
+                header_options,
+                index=default_idx,
+                key="excel_header_mode",
+                label_visibility="collapsed",
+                help="Auto-detect uses the first non-empty row as headers. 'No header' generates Column_1, Column_2, etc.",
+                horizontal=True
+            )
+
+            new_header_row = None
+            if header_choice == "No header":
+                new_header_row = 0
+            elif header_choice == "Specific row":
+                new_header_row = st.number_input(
+                    "Header is on row",
+                    min_value=1,
+                    max_value=999,
+                    value=max(1, current_hr or 1),
+                    key="excel_header_row_num"
                 )
 
-                new_header_row = None
-                if header_choice == "No header":
-                    new_header_row = 0
-                elif header_choice == "Specific row":
-                    new_header_row = st.number_input(
-                        "Header is on row",
-                        min_value=1,
-                        max_value=999,
-                        value=max(1, current_hr or 1),
-                        key="excel_header_row_num"
-                    )
-
-                # Update session state (will take effect on next Load)
-                if new_header_row != st.session_state.get('excel_header_row'):
-                    st.session_state.excel_header_row = new_header_row
+            # Update session state (will take effect on next Load)
+            if new_header_row != st.session_state.get('excel_header_row'):
+                st.session_state.excel_header_row = new_header_row
 
             # Load/Reload button
             if st.button("🔄 Load/Reload Excel", width='stretch'):
@@ -2345,15 +2344,15 @@ def render_excel_sidebar_content():
                 file_bytes = uploaded_file.getvalue()
                 new_hash = hashlib.md5(file_bytes).hexdigest()
 
-                # Reset Excel state
+                # Reset Excel state (keep header_row — user's choice should persist)
                 st.session_state.excel_file_hash = new_hash
                 st.session_state.excel_products = []
                 st.session_state.excel_current_sheet = None
                 st.session_state.excel_preview_cache = None
                 st.session_state.excel_preview_cache_key = None
-
-                # Store file bytes for re-processing on header change
-                st.session_state.excel_file_bytes = file_bytes
+                st.session_state.excel_doc = None  # Force full re-processing
+                st.session_state.excel_start_row = None
+                st.session_state.excel_end_row = None
 
                 # Load the Excel file
                 with st.spinner("Loading Excel..."):
@@ -3084,10 +3083,26 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                                 best_score = score
                                 matched_row = excel_row
 
-                    # Set source_rows: prefer LLM-provided, then matched, then fallback
+                    # Validate and fix LLM-provided source_rows
+                    # The prompt sends absolute Excel rows (e.g. "Row 20: {...}"),
+                    # but the LLM sometimes returns relative indices (1, 2, 3...)
+                    batch_excel_start = start_row + batch_start
+                    batch_excel_end = start_row + batch_end - 1
                     if product.source_rows and len(product.source_rows) > 0:
-                        # LLM provided source_rows — keep them (multi-row products)
-                        # Optionally add matched_row if not already included
+                        # Check if LLM rows fall within the batch range
+                        in_range = all(batch_excel_start <= r <= batch_excel_end for r in product.source_rows)
+                        if not in_range:
+                            # Try interpreting as 1-based relative indices within the batch
+                            offset_rows = [batch_excel_start + (r - 1) for r in product.source_rows]
+                            if all(batch_excel_start <= r <= batch_excel_end for r in offset_rows):
+                                product.source_rows = offset_rows
+                            else:
+                                # Can't salvage — discard and let matching handle it
+                                product.source_rows = []
+
+                    # Set source_rows: prefer validated LLM-provided, then matched, then fallback
+                    if product.source_rows and len(product.source_rows) > 0:
+                        # LLM provided valid source_rows — keep them
                         if matched_row and matched_row not in product.source_rows:
                             product.source_rows.insert(0, matched_row)
                     elif matched_row:
@@ -3097,26 +3112,36 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                         rows_per_product = max(1, len(batch_rows) // max(1, len(products)))
                         product.source_rows = [start_row + batch_start + prod_idx * rows_per_product]
 
-                    # Associate image using batch-based row ownership
-                    # LLM source_rows may miss rows without data (e.g., image-only rows),
-                    # so we compute the row range each product "owns" from the batch
-                    # meta.row is 0-based openpyxl row
+                    # Associate image — prefer source_rows, fall back to positional
                     if include_images and image_store:
-                        rows_per_product = max(1, len(batch_rows) // max(1, len(products)))
-                        # Product owns rows from its position in the batch
-                        own_start = start_row + batch_start + prod_idx * rows_per_product
-                        own_end = start_row + batch_start + (prod_idx + 1) * rows_per_product
-                        # For the last product, extend to end of batch
-                        if prod_idx == len(products) - 1:
-                            own_end = start_row + batch_end
-                        for r in range(own_start, own_end + 1):
-                            openpyxl_row = r - 1  # Convert 1-based Excel to 0-based openpyxl
-                            meta = sheet.get_image_meta_for_row(openpyxl_row)
-                            if meta:
-                                b64 = image_store.get_image_base64(meta.sheet_name, meta.index)
-                                if b64:
-                                    product.excel_image = b64
-                                break
+                        image_found = False
+                        # Primary: use the product's actual source_rows (1-based Excel rows)
+                        if product.source_rows:
+                            for src_row in product.source_rows:
+                                openpyxl_row = src_row - 1  # 1-based Excel → 0-based openpyxl
+                                meta = sheet.get_image_meta_for_row(openpyxl_row)
+                                if meta:
+                                    b64 = image_store.get_image_base64(meta.sheet_name, meta.index)
+                                    if b64:
+                                        product.excel_image = b64
+                                        image_found = True
+                                    break
+
+                        # Fallback: positional ownership when source_rows didn't yield an image
+                        if not image_found:
+                            rows_per_product = max(1, len(batch_rows) // max(1, len(products)))
+                            own_start = start_row + batch_start + prod_idx * rows_per_product
+                            own_end = start_row + batch_start + (prod_idx + 1) * rows_per_product
+                            if prod_idx == len(products) - 1:
+                                own_end = start_row + batch_end
+                            for r in range(own_start, own_end + 1):
+                                openpyxl_row = r - 1
+                                meta = sheet.get_image_meta_for_row(openpyxl_row)
+                                if meta:
+                                    b64 = image_store.get_image_base64(meta.sheet_name, meta.index)
+                                    if b64:
+                                        product.excel_image = b64
+                                    break
 
                     st.session_state.excel_products.append(product)
                     total_products += 1
