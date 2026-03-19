@@ -674,7 +674,8 @@ def render_product_preview(product, idx: int, page_num: int):
                         with st.spinner("Removing background..."):
                             try:
                                 if _rembg_session is None:
-                                    st.error("rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
+                                    st.error(
+                                        "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                                     st.stop()
                                 from PIL import Image
                                 import io
@@ -688,7 +689,8 @@ def render_product_preview(product, idx: int, page_num: int):
                                 import rembg
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(input_img, session=_rembg_session)
+                                    output_img = rembg.remove(
+                                        input_img, session=_rembg_session)
 
                                 # Process to properly handle transparency
                                 output_buffer = io.BytesIO()
@@ -2885,7 +2887,8 @@ def render_excel_product_card(product: Product, idx: int):
                             try:
                                 import warnings
                                 if _rembg_session is None:
-                                    st.error("rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
+                                    st.error(
+                                        "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                                     st.stop()
                                 from PIL import Image
                                 import io
@@ -2897,7 +2900,8 @@ def render_excel_product_card(product: Product, idx: int):
                                 import rembg
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(input_img, session=_rembg_session)
+                                    output_img = rembg.remove(
+                                        input_img, session=_rembg_session)
                                 output_buffer = io.BytesIO()
                                 output_img.save(output_buffer, format='PNG')
                                 product.excel_image = base64.b64encode(
@@ -3464,7 +3468,8 @@ def render_excel_export_view():
                         import warnings
                         import os
                         if _rembg_session is None:
-                            st.error("rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
+                            st.error(
+                                "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                             st.stop()
                         from PIL import Image
                         import io
@@ -3477,7 +3482,8 @@ def render_excel_export_view():
                                 input_img = Image.open(io.BytesIO(img_data))
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(input_img, session=_rembg_session)
+                                    output_img = rembg.remove(
+                                        input_img, session=_rembg_session)
                                 output_buffer = io.BytesIO()
                                 output_img.save(output_buffer, format='PNG')
                                 p.excel_image = base64.b64encode(
