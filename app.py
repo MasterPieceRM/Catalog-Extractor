@@ -48,6 +48,7 @@ DEFAULT_SCHEMA_FIELDS = [
         "description": "Product category", "hint": ""},
 ]
 
+
 def evaluate_computed_fields(product, computed_fields: list):
     """Calculate values for computed fields based on product attributes"""
     results = {}
@@ -59,14 +60,16 @@ def evaluate_computed_fields(product, computed_fields: list):
         try:
             factor = 10 ** d
             return math.ceil(float(n) * factor) / factor
-        except: return n
+        except:
+            return n
 
     def ROUNDDOWN(n, d=0):
         try:
             factor = 10 ** d
             return math.floor(float(n) * factor) / factor
-        except: return n
-        
+        except:
+            return n
+
     def IF(condition, true_val, false_val):
         return true_val if condition else false_val
 
@@ -80,11 +83,11 @@ def evaluate_computed_fields(product, computed_fields: list):
         "AVERAGE": lambda *args: sum(args)/len(args) if args else 0,
         "average": lambda *args: sum(args)/len(args) if args else 0
     }
-    
+
     # Add product field values to context
     # Need to access schema fields to know what fields exist
     # But product object has attributes directly mapped or in raw_attributes
-    
+
     # We'll just inspect the product object
     try:
         # 1. Add direct attributes
@@ -94,25 +97,27 @@ def evaluate_computed_fields(product, computed_fields: list):
                 # Handle price objects specially if needed
                 if attr == 'price' and hasattr(val, 'amount'):
                     val = val.amount
-                
+
                 # Convert to numeric if possible (for math operations)
                 if val is not None:
                     try:
-                        context[attr] = float(str(val).replace(',', '').replace('$', '').strip())
+                        context[attr] = float(str(val).replace(
+                            ',', '').replace('$', '').strip())
                     except:
                         context[attr] = val
-        
+
         # 2. Add raw attributes (which cover schema fields)
         if hasattr(product, 'raw_attributes') and product.raw_attributes:
             for k, v in product.raw_attributes.items():
-                if k not in context: # Don't overwrite direct attrs
+                if k not in context:  # Don't overwrite direct attrs
                     try:
-                        context[k] = float(str(v).replace(',', '').replace('$', '').strip())
+                        context[k] = float(str(v).replace(
+                            ',', '').replace('$', '').strip())
                     except:
                         context[k] = v
-                        
+
     except Exception as e:
-        pass # Best effort context building
+        pass  # Best effort context building
 
     # Evaluate each formula
     for field in computed_fields:
@@ -121,36 +126,38 @@ def evaluate_computed_fields(product, computed_fields: list):
         if not formula:
             results[name] = ""
             continue
-            
+
         try:
             # Replace {field} with field variable name for python eval
             # Simple replacement of {name} -> name
             py_formula = formula
-            
+
             # Find all {var} patterns
             vars_needed = re.findall(r'\{(\w+)\}', py_formula)
             for var in vars_needed:
                 # Check if var is in context, simpler string replace
                 py_formula = py_formula.replace(f"{{{var}}}", var)
                 if var not in context:
-                    context[var] = 0 # Default to 0 for missing fields to avoid NameError? Or None?
+                    # Default to 0 for missing fields to avoid NameError? Or None?
+                    context[var] = 0
                     # Excel treats empty as 0 in math.
-            
+
             # RESTRICTED Eval
             # Only allow builtins in our safe execution context (math functions)
             # Remove __builtins__ access
             res = eval(py_formula, {"__builtins__": None}, context)
-            
+
             # Format result if float
             if isinstance(res, float):
                 results[name] = round(res, 2)
             else:
                 results[name] = res
-                
+
         except Exception as e:
-            results[name] = "Error" # Simplified error message for UI
-            
+            results[name] = "Error"  # Simplified error message for UI
+
     return results
+
 
 # Default page layout context
 DEFAULT_PAGE_CONTEXT = ""
@@ -169,7 +176,8 @@ def init_session_state():
         'file_hash': None,
         'processing_status': None,
         'schema_fields': [f.copy() for f in DEFAULT_SCHEMA_FIELDS],
-        'computed_fields': [],  # List of dicts: {'name': 'total_cost', 'formula': '{price} * {qty}'}
+        # List of dicts: {'name': 'total_cost', 'formula': '{price} * {qty}'}
+        'computed_fields': [],
         'field_to_delete': None,  # For schema field deletion
         'page_layout_context': DEFAULT_PAGE_CONTEXT,  # Describes overall page layout
         'editing_field_hint': None,  # Track which field hint is being edited
@@ -297,6 +305,7 @@ def render_pdf_sidebar_content():
                     st.session_state.pdf_doc = processor.extract_all_pages(
                         file_path)
                     st.session_state.current_page = 0
+                    st.session_state.view_mode = 'schema'
 
                 st.success(
                     f"Loaded {st.session_state.pdf_doc.total_pages} pages")
@@ -305,43 +314,27 @@ def render_pdf_sidebar_content():
 
         # Navigation
         if st.session_state.pdf_doc:
-            st.subheader("📑 Navigation")
-
-            # Page selector with callback to ensure immediate update
-            def on_page_change():
-                st.session_state.current_page = st.session_state.page_selector - 1
-
-            st.number_input(
-                "Page",
-                min_value=1,
-                max_value=st.session_state.pdf_doc.total_pages,
-                value=st.session_state.current_page + 1,
-                step=1,
-                key="page_selector",
-                on_change=on_page_change
-            )
-
             # View mode - vertical buttons
             st.subheader("👁️ View Mode")
 
-            if st.button("📄 Extraction", width='stretch',
+            if st.button("Schema", width='stretch',
+                         type="primary" if st.session_state.view_mode == 'schema' else "secondary"):
+                st.session_state.view_mode = 'schema'
+                st.rerun()
+
+            if st.button("Extraction", width='stretch',
                          type="primary" if st.session_state.view_mode == 'extraction' else "secondary"):
                 st.session_state.view_mode = 'extraction'
                 st.rerun()
 
-            if st.button("🔍 Review", width='stretch',
+            if st.button("Review", width='stretch',
                          type="primary" if st.session_state.view_mode == 'review' else "secondary"):
                 st.session_state.view_mode = 'review'
                 st.rerun()
 
-            if st.button("📤 Export", width='stretch',
+            if st.button("Export", width='stretch',
                          type="primary" if st.session_state.view_mode == 'export' else "secondary"):
                 st.session_state.view_mode = 'export'
-                st.rerun()
-
-            if st.button("📋 Schema", width='stretch',
-                         type="primary" if st.session_state.view_mode == 'schema' else "secondary"):
-                st.session_state.view_mode = 'schema'
                 st.rerun()
 
             st.divider()
@@ -349,12 +342,6 @@ def render_pdf_sidebar_content():
             # Product count
             st.subheader("📊 Stats")
             st.metric("Products", len(st.session_state.products))
-        else:
-            # Show schema config even without PDF loaded
-            st.subheader("⚙️ Setup")
-            if st.button("📋 Configure Schema", width='stretch'):
-                st.session_state.view_mode = 'schema'
-                st.rerun()
 
         st.divider()
 
@@ -398,8 +385,25 @@ def render_extraction_view():
     page_num = page.page_num
 
     with col_pdf:
-        st.subheader(
-            f"📄 Page {page_num + 1} of {st.session_state.pdf_doc.total_pages}")
+        total_pages = st.session_state.pdf_doc.total_pages
+
+        def on_extraction_page_change():
+            st.session_state.current_page = st.session_state.extraction_page_selector - 1
+
+        nav_col, title_col = st.columns([1, 2])
+        with nav_col:
+            st.number_input(
+                "Page",
+                min_value=1,
+                max_value=total_pages,
+                value=st.session_state.current_page + 1,
+                step=1,
+                key="extraction_page_selector",
+                on_change=on_extraction_page_change,
+                label_visibility="collapsed"
+            )
+        with title_col:
+            st.subheader(f"📄 Page {page_num + 1} of {total_pages}")
 
         # Display page image
         if page.image:
@@ -447,7 +451,8 @@ def render_extraction_view():
                     "From page",
                     min_value=1,
                     max_value=total_pages,
-                    value=st.session_state.get('bulk_start_page', 1),
+                    value=min(st.session_state.get(
+                        'bulk_start_page', 1), total_pages),
                     key="bulk_start_page_input"
                 )
                 st.session_state.bulk_start_page = start_page
@@ -456,7 +461,8 @@ def render_extraction_view():
                     "To page",
                     min_value=1,
                     max_value=total_pages,
-                    value=st.session_state.get('bulk_end_page', total_pages),
+                    value=min(st.session_state.get(
+                        'bulk_end_page', total_pages), total_pages),
                     key="bulk_end_page_input"
                 )
                 st.session_state.bulk_end_page = end_page
@@ -648,22 +654,18 @@ def render_product_preview(product, idx: int, page_num: int):
                     if product.images and product.images[0].image_data:
                         with st.spinner("Removing background..."):
                             try:
-                                # Suppress ONNX Runtime and Numba warnings
                                 import warnings
                                 import os
                                 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-                                with warnings.catch_warnings():
-                                    warnings.filterwarnings(
-                                        "ignore", category=UserWarning)
-                                    warnings.filterwarnings(
-                                        "ignore", category=DeprecationWarning)
-                                    warnings.filterwarnings(
-                                        "ignore", message=".*TBB.*")
-                                    warnings.filterwarnings(
-                                        "ignore", message=".*GPU.*")
-                                    warnings.filterwarnings(
-                                        "ignore", message=".*onnxruntime.*")
-                                    import rembg
+                                os.environ['ORT_LOGGING_LEVEL'] = '3'
+                                try:
+                                    with warnings.catch_warnings():
+                                        warnings.simplefilter("ignore")
+                                        import rembg
+                                except ImportError:
+                                    st.error(
+                                        "rembg is not installed. Run: pip install rembg")
+                                    st.stop()
                                 from PIL import Image
                                 import io
 
@@ -672,7 +674,7 @@ def render_product_preview(product, idx: int, page_num: int):
                                     product.images[0].image_data)
                                 input_img = Image.open(io.BytesIO(img_data))
 
-                                # Remove BG (suppress warnings during removal too)
+                                # Remove BG
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
                                     output_img = rembg.remove(input_img)
@@ -685,7 +687,6 @@ def render_product_preview(product, idx: int, page_num: int):
 
                                 # Update
                                 product.images[0].image_data = new_b64
-                                # st.success("Background removed!") # Optional, might flicker
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to remove background: {e}")
@@ -1194,7 +1195,8 @@ def render_product_review_card(product: Product, idx: int):
                     name = field['name']
                     # Use unique key if creating widgets, but here we just use markdown
                     val = results.get(name, "")
-                    st.markdown(f"**{name.replace('_', ' ').title()} (calc):** {val}")
+                    st.markdown(
+                        f"**{name.replace('_', ' ').title()} (calc):** {val}")
 
             # Show any extra raw_attributes not in schema (excluding image_bbox)
             extra_attrs = {k: v for k, v in product.raw_attributes.items()
@@ -1333,7 +1335,8 @@ def render_export_view():
                 excel_bytes = excel_exporter.export_products_to_excel(
                     products=products_to_export,
                     schema_fields=schema_fields,
-                    computed_fields=st.session_state.get('computed_fields', []),
+                    computed_fields=st.session_state.get(
+                        'computed_fields', []),
                     include_images=include_images_excel,
                     image_size=image_size,
                     include_page_info=include_page_info,
@@ -1711,9 +1714,11 @@ def update_schema_field(old_name: str, idx: int):
             break
 
     # Check for duplicate names (excluding self and computed fields)
-    other_names = [f['name'] for i, f in enumerate(st.session_state.schema_fields) if i != idx]
-    computed_names = [f['name'] for f in st.session_state.get('computed_fields', [])]
-    
+    other_names = [f['name'] for i, f in enumerate(
+        st.session_state.schema_fields) if i != idx]
+    computed_names = [f['name']
+                      for f in st.session_state.get('computed_fields', [])]
+
     if new_name in other_names or new_name in computed_names:
         st.session_state.edit_error = f"Field name '{new_name}' already exists!"
         return
@@ -1748,6 +1753,158 @@ def render_schema_config():
     st.subheader("📋 Configure Extraction Schema")
     st.caption(
         f"Define fields and add extraction hints to guide the AI on how to find data in your {mode_label.lower()} catalog")
+
+    # ===== DATA PREVIEW =====
+    if is_excel_mode:
+        excel_doc = st.session_state.get('excel_doc')
+        sheet_name = st.session_state.get('excel_current_sheet')
+        if excel_doc and sheet_name:
+            sheet = excel_doc.get_sheet(sheet_name)
+            if sheet:
+                import pandas as pd
+                with st.expander(f"Preview Data — {sheet_name} ({sheet.total_rows} rows, {len(sheet.headers)} cols)", expanded=True):
+                    preview_size = st.slider(
+                        "Preview rows",
+                        min_value=10,
+                        max_value=min(200, sheet.total_rows),
+                        value=min(50, sheet.total_rows),
+                        step=10,
+                        key="schema_preview_size"
+                    )
+                    cache_key = f"{sheet_name}_{preview_size}_{sheet.total_rows}"
+                    if st.session_state.excel_preview_cache_key != cache_key:
+                        preview_data = sheet.get_preview(preview_size)
+                        if preview_data:
+                            df = pd.DataFrame(
+                                preview_data, columns=sheet.headers)
+                            df.index = range(
+                                sheet.data_start_excel_row, sheet.data_start_excel_row + len(df))
+                            df = df.astype(str)
+                            st.session_state.excel_preview_cache = df
+                            st.session_state.excel_preview_cache_key = cache_key
+                        else:
+                            st.session_state.excel_preview_cache = None
+                    df = st.session_state.excel_preview_cache
+                    if df is not None:
+                        st.dataframe(df, width='stretch', height=400)
+                    else:
+                        st.info("No data to preview")
+
+                # Images section (expanded by default in schema view)
+                num_images_schema = getattr(sheet, 'image_count', 0) or len(
+                    getattr(sheet, 'images', []))
+                if num_images_schema > 0:
+                    image_store = getattr(
+                        st.session_state.excel_doc, 'image_store', None)
+                    image_metas = getattr(sheet, 'image_metas', [])
+                    with st.expander(f"🖼️ Images ({num_images_schema} found)", expanded=False):
+                        st.info(
+                            f"Found {num_images_schema} embedded images. Images are loaded on demand.")
+                        row_search_schema = st.text_input(
+                            "🔍 Search by row to load images",
+                            placeholder="Enter row number or range (e.g., '5' or '10-20')",
+                            key="schema_image_row_search"
+                        )
+                        if not row_search_schema:
+                            st.info(
+                                "💡 Enter a row number or range above to load images.")
+                        else:
+                            filtered_metas = []
+                            try:
+                                if '-' in row_search_schema:
+                                    start, end = map(
+                                        int, row_search_schema.split('-'))
+                                    filtered_metas = [
+                                        m for m in image_metas if start <= m.row + 1 <= end]
+                                else:
+                                    target_row = int(row_search_schema)
+                                    filtered_metas = [
+                                        m for m in image_metas if m.row + 1 == target_row]
+                                if filtered_metas:
+                                    st.success(
+                                        f"Found {len(filtered_metas)} images matching row(s) {row_search_schema}")
+                                else:
+                                    st.warning(
+                                        f"No images found for row(s) {row_search_schema}")
+                            except ValueError:
+                                st.warning(
+                                    "Invalid format. Use a number or range (e.g., '10-20')")
+                            PAGE_SIZE = 20
+                            total_filtered = len(filtered_metas)
+                            if total_filtered > PAGE_SIZE:
+                                max_page = (total_filtered - 1) // PAGE_SIZE
+                                img_page = st.number_input(
+                                    f"Page (1-{max_page + 1})",
+                                    min_value=1, max_value=max_page + 1, value=1,
+                                    key="schema_image_page"
+                                ) - 1
+                                page_start = img_page * PAGE_SIZE
+                                page_metas = filtered_metas[page_start:page_start + PAGE_SIZE]
+                                st.caption(
+                                    f"Showing {page_start + 1}-{min(page_start + PAGE_SIZE, total_filtered)} of {total_filtered}")
+                            else:
+                                page_metas = filtered_metas
+                            if image_store and page_metas:
+                                cols_per_row = 4
+                                for i in range(0, len(page_metas), cols_per_row):
+                                    cols = st.columns(cols_per_row)
+                                    for j, col in enumerate(cols):
+                                        if i + j < len(page_metas):
+                                            meta = page_metas[i + j]
+                                            with col:
+                                                try:
+                                                    img_bytes = image_store.get_image_bytes(
+                                                        meta.sheet_name, meta.index)
+                                                    if img_bytes:
+                                                        st.image(
+                                                            img_bytes, caption=f"Row {meta.row + 1}")
+                                                    else:
+                                                        st.caption(
+                                                            f"Row {meta.row + 1}: ⚠️")
+                                                except Exception:
+                                                    st.caption(
+                                                        f"Row {meta.row + 1}: Error")
+                            elif not image_store:
+                                st.warning(
+                                    "Image store not available (file may need to be reloaded)")
+    else:
+        # PDF mode: show current page preview
+        pdf_doc = st.session_state.get('pdf_doc')
+        if pdf_doc:
+            current_page_num = st.session_state.get('current_page', 0)
+            total_pages = pdf_doc.total_pages
+            with st.expander(f"Preview Page — Page {current_page_num + 1} of {total_pages}", expanded=True):
+                page_to_show = st.number_input(
+                    "Page number",
+                    min_value=1,
+                    max_value=total_pages,
+                    value=current_page_num + 1,
+                    step=1,
+                    key="schema_pdf_preview_page"
+                ) - 1
+                page = pdf_doc.pages[page_to_show]
+                col_img, col_text = st.columns([1, 1])
+                with col_img:
+                    if page.image:
+                        st.image(page.image, width="stretch")
+                    else:
+                        st.info("No image available for this page")
+                with col_text:
+                    if page.blocks:
+                        text_blocks = [b.get('text', '').strip(
+                        ) for b in page.blocks if b.get('text', '').strip()]
+                        if text_blocks:
+                            st.caption(f"📝 {len(text_blocks)} text blocks")
+                            for i, block in enumerate(text_blocks[:15]):
+                                st.code(
+                                    block[:200] + ('...' if len(block) > 200 else ''), language=None)
+                            if len(text_blocks) > 15:
+                                st.caption(
+                                    f"... and {len(text_blocks) - 15} more blocks")
+                        else:
+                            st.info("No text blocks found")
+                    else:
+                        st.info("No text on this page")
 
     # Show any edit errors
     if st.session_state.get('edit_error'):
@@ -1927,7 +2084,7 @@ def render_schema_config():
     """)
 
     computed_fields = st.session_state.get('computed_fields', [])
-    
+
     # Display existing computed fields
     if computed_fields:
         for idx, field in enumerate(computed_fields):
@@ -1971,11 +2128,11 @@ def render_schema_config():
                 if new_comp_name and new_comp_formula:
                     # simplistic validation
                     clean_name = new_comp_name.lower().replace(" ", "_")
-                    
+
                     # Check duplicates
                     all_names = [f['name'] for f in st.session_state.schema_fields] + \
                                 [f['name'] for f in computed_fields]
-                    
+
                     if clean_name in all_names:
                         st.error(f"Field '{clean_name}' already exists")
                     else:
@@ -2085,19 +2242,6 @@ def render_schema_config():
             f.copy() for f in DEFAULT_SCHEMA_FIELDS]
         st.session_state.page_layout_context = DEFAULT_PAGE_CONTEXT
         st.rerun()
-
-    # Preview prompt
-    st.divider()
-    st.markdown("### 👁️ Preview Extraction Prompt")
-    if st.checkbox("Show prompt that will be sent to AI", value=False):
-        if is_excel_mode:
-            prompt = get_excel_schema_prompt()
-            st.code(prompt.format(
-                headers="[COLUMN HEADERS]", sample_rows="[SAMPLE DATA ROWS]"), language="text")
-        else:
-            prompt = get_schema_prompt()
-            st.code(prompt.format(
-                text="[YOUR CATALOG TEXT HERE]", page_num=1), language="text")
 
 
 def get_schema_prompt():
@@ -2405,60 +2549,31 @@ def render_excel_sidebar_content():
 
             st.divider()
 
-            # Row range (uses Excel-absolute row numbers)
-            if sheet:
-                st.subheader("⚙️ Row Range")
-                excel_first = sheet.data_start_excel_row
-                excel_last = sheet.data_start_excel_row + sheet.total_rows - 1
-                # Ensure session state values are valid before widget renders
-                if not st.session_state.excel_start_row or st.session_state.excel_start_row < excel_first or st.session_state.excel_start_row > excel_last:
-                    st.session_state.excel_start_row = excel_first
-                if not st.session_state.excel_end_row or st.session_state.excel_end_row < excel_first or st.session_state.excel_end_row > excel_last:
-                    st.session_state.excel_end_row = excel_last
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.number_input(
-                        "From row",
-                        min_value=excel_first,
-                        max_value=excel_last,
-                        key="excel_start_row"
-                    )
-                with col2:
-                    st.number_input(
-                        "To row",
-                        min_value=excel_first,
-                        max_value=excel_last,
-                        key="excel_end_row"
-                    )
-
-            st.divider()
-
             # View mode - vertical buttons (matching PDF style)
             st.subheader("👁️ View Mode")
 
-            if st.button("📄 Extraction", width='stretch',
+            if st.button("Schema", width='stretch',
+                         type="primary" if st.session_state.excel_view_mode == 'schema' else "secondary",
+                         key="excel_view_schema"):
+                st.session_state.excel_view_mode = 'schema'
+                st.rerun()
+
+            if st.button("Extraction", width='stretch',
                          type="primary" if st.session_state.excel_view_mode == 'extraction' else "secondary",
                          key="excel_view_extraction"):
                 st.session_state.excel_view_mode = 'extraction'
                 st.rerun()
 
-            if st.button("🔍 Review", width='stretch',
+            if st.button("Review", width='stretch',
                          type="primary" if st.session_state.excel_view_mode == 'review' else "secondary",
                          key="excel_view_review"):
                 st.session_state.excel_view_mode = 'review'
                 st.rerun()
 
-            if st.button("📤 Export", width='stretch',
+            if st.button("Export", width='stretch',
                          type="primary" if st.session_state.excel_view_mode == 'export' else "secondary",
                          key="excel_view_export"):
                 st.session_state.excel_view_mode = 'export'
-                st.rerun()
-
-            if st.button("📋 Schema", width='stretch',
-                         type="primary" if st.session_state.excel_view_mode == 'schema' else "secondary",
-                         key="excel_view_schema"):
-                st.session_state.excel_view_mode = 'schema'
                 st.rerun()
 
             st.divider()
@@ -2466,11 +2581,6 @@ def render_excel_sidebar_content():
             # Stats
             st.subheader("📊 Stats")
             st.metric("Products", len(st.session_state.excel_products))
-        else:
-            # Show schema config even without Excel file loaded
-            st.divider()
-            if st.button("📋 Configure Schema", key="excel_configure_schema", width='stretch'):
-                st.session_state.excel_view_mode = 'schema'
 
 
 def render_excel_extraction_view():
@@ -2515,7 +2625,8 @@ def render_excel_extraction_view():
             if preview_data:
                 df = pd.DataFrame(preview_data, columns=sheet.headers)
                 # Index = actual Excel row numbers (data starts after headers)
-                df.index = range(sheet.data_start_excel_row, sheet.data_start_excel_row + len(df))
+                df.index = range(sheet.data_start_excel_row,
+                                 sheet.data_start_excel_row + len(df))
                 df = df.astype(str)
                 st.session_state.excel_preview_cache = df
                 st.session_state.excel_preview_cache_key = cache_key
@@ -2634,8 +2745,37 @@ def render_excel_extraction_view():
     st.divider()
 
     # Extraction controls
-    start_row = st.session_state.excel_start_row or sheet.data_start_excel_row
-    end_row = st.session_state.excel_end_row or (sheet.data_start_excel_row + sheet.total_rows - 1)
+    # Row range (uses Excel-absolute row numbers)
+    excel_first = sheet.data_start_excel_row
+    excel_last = sheet.data_start_excel_row + sheet.total_rows - 1
+    if not st.session_state.excel_start_row or st.session_state.excel_start_row < excel_first or st.session_state.excel_start_row > excel_last:
+        st.session_state.excel_start_row = excel_first
+    if not st.session_state.excel_end_row or st.session_state.excel_end_row < excel_first or st.session_state.excel_end_row > excel_last:
+        st.session_state.excel_end_row = excel_last
+
+    st.markdown("**⚙️ Row Range**")
+    col_row1, col_row2 = st.columns(2)
+    with col_row1:
+        new_start = st.number_input(
+            "From row",
+            min_value=excel_first,
+            max_value=excel_last,
+            value=st.session_state.excel_start_row,
+            key="_excel_start_row_widget"
+        )
+        st.session_state.excel_start_row = new_start
+    with col_row2:
+        new_end = st.number_input(
+            "To row",
+            min_value=excel_first,
+            max_value=excel_last,
+            value=st.session_state.excel_end_row,
+            key="_excel_end_row_widget"
+        )
+        st.session_state.excel_end_row = new_end
+
+    start_row = st.session_state.excel_start_row
+    end_row = st.session_state.excel_end_row
 
     st.checkbox(
         "🖼️ Include Images",
@@ -2658,7 +2798,8 @@ def render_excel_extraction_view():
             step=1,
             help="Number of rows sent to the AI per batch. Smaller = more accurate, larger = faster. For multi-row products, use a multiple of row count per product.",
             key="_llm_batch_size_widget",
-            on_change=lambda: setattr(st.session_state, 'excel_llm_batch_size', st.session_state._llm_batch_size_widget)
+            on_change=lambda: setattr(
+                st.session_state, 'excel_llm_batch_size', st.session_state._llm_batch_size_widget)
         )
 
     col_btn1, col_btn2 = st.columns(2)
@@ -2734,9 +2875,15 @@ def render_excel_product_card(product: Product, idx: int):
                                 import warnings
                                 import os
                                 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-                                with warnings.catch_warnings():
-                                    warnings.filterwarnings("ignore")
-                                    import rembg
+                                os.environ['ORT_LOGGING_LEVEL'] = '3'
+                                try:
+                                    with warnings.catch_warnings():
+                                        warnings.simplefilter("ignore")
+                                        import rembg
+                                except ImportError:
+                                    st.error(
+                                        "rembg is not installed. Run: pip install rembg")
+                                    st.stop()
                                 from PIL import Image
                                 import io
 
@@ -2978,9 +3125,6 @@ def render_product_fields(product: Product, idx: int):
                 product.raw_attributes[field_name] = new_value
 
 
-
-
-
 def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int = 20, include_images: bool = True):
     """Extract products by sending row batches to the LLM with full schema/hints context."""
     import json as _json
@@ -2990,7 +3134,8 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
     st.session_state.excel_products = []
 
     extractor = LLMExtractor()
-    schema_fields = st.session_state.get('schema_fields', DEFAULT_SCHEMA_FIELDS)
+    schema_fields = st.session_state.get(
+        'schema_fields', DEFAULT_SCHEMA_FIELDS)
     layout_context = st.session_state.get('page_layout_context', '')
 
     # Build image index if needed
@@ -3007,7 +3152,8 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
     num_batches = (total_rows + batch_size - 1) // batch_size
 
     with st.status(f"🧠 Extracting with LLM ({num_batches} batches)...", expanded=True) as status:
-        progress_bar = st.progress(0, text=f"Processing batch 0/{num_batches}...")
+        progress_bar = st.progress(
+            0, text=f"Processing batch 0/{num_batches}...")
         total_products = 0
 
         for batch_idx in range(num_batches):
@@ -3021,10 +3167,12 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                 # start_row is already Excel-absolute
                 excel_row = start_row + batch_start + i
                 row_dict = {h: v for h, v in zip(sheet.headers, row)}
-                row_lines.append(f"Row {excel_row}: {_json.dumps(row_dict, default=str)}")
+                row_lines.append(
+                    f"Row {excel_row}: {_json.dumps(row_dict, default=str)}")
             data_text = "\n".join(row_lines)
 
-            st.text(f"Batch {batch_idx + 1}/{num_batches}: Excel rows {start_row + batch_start}-{start_row + batch_end - 1}")
+            st.text(
+                f"Batch {batch_idx + 1}/{num_batches}: Excel rows {start_row + batch_start}-{start_row + batch_end - 1}")
 
             try:
                 # Call LLM with full schema context
@@ -3054,7 +3202,8 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                 if include_images and image_store:
                     batch_row_set = set()
                     for excel_row, _, _ in batch_row_values:
-                        batch_row_set.add(excel_row - 1)  # Convert to 0-based for preload
+                        # Convert to 0-based for preload
+                        batch_row_set.add(excel_row - 1)
                     image_store.preload_for_rows(
                         sheet.name, sheet.image_metas, batch_row_set)
 
@@ -3090,10 +3239,12 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                     batch_excel_end = start_row + batch_end - 1
                     if product.source_rows and len(product.source_rows) > 0:
                         # Check if LLM rows fall within the batch range
-                        in_range = all(batch_excel_start <= r <= batch_excel_end for r in product.source_rows)
+                        in_range = all(
+                            batch_excel_start <= r <= batch_excel_end for r in product.source_rows)
                         if not in_range:
                             # Try interpreting as 1-based relative indices within the batch
-                            offset_rows = [batch_excel_start + (r - 1) for r in product.source_rows]
+                            offset_rows = [batch_excel_start +
+                                           (r - 1) for r in product.source_rows]
                             if all(batch_excel_start <= r <= batch_excel_end for r in offset_rows):
                                 product.source_rows = offset_rows
                             else:
@@ -3109,8 +3260,10 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                         product.source_rows = [matched_row]
                     else:
                         # Positional fallback: distribute evenly
-                        rows_per_product = max(1, len(batch_rows) // max(1, len(products)))
-                        product.source_rows = [start_row + batch_start + prod_idx * rows_per_product]
+                        rows_per_product = max(
+                            1, len(batch_rows) // max(1, len(products)))
+                        product.source_rows = [
+                            start_row + batch_start + prod_idx * rows_per_product]
 
                     # Associate image — prefer source_rows, fall back to positional
                     if include_images and image_store:
@@ -3119,9 +3272,11 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                         if product.source_rows:
                             for src_row in product.source_rows:
                                 openpyxl_row = src_row - 1  # 1-based Excel → 0-based openpyxl
-                                meta = sheet.get_image_meta_for_row(openpyxl_row)
+                                meta = sheet.get_image_meta_for_row(
+                                    openpyxl_row)
                                 if meta:
-                                    b64 = image_store.get_image_base64(meta.sheet_name, meta.index)
+                                    b64 = image_store.get_image_base64(
+                                        meta.sheet_name, meta.index)
                                     if b64:
                                         product.excel_image = b64
                                         image_found = True
@@ -3129,16 +3284,20 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
 
                         # Fallback: positional ownership when source_rows didn't yield an image
                         if not image_found:
-                            rows_per_product = max(1, len(batch_rows) // max(1, len(products)))
+                            rows_per_product = max(
+                                1, len(batch_rows) // max(1, len(products)))
                             own_start = start_row + batch_start + prod_idx * rows_per_product
-                            own_end = start_row + batch_start + (prod_idx + 1) * rows_per_product
+                            own_end = start_row + batch_start + \
+                                (prod_idx + 1) * rows_per_product
                             if prod_idx == len(products) - 1:
                                 own_end = start_row + batch_end
                             for r in range(own_start, own_end + 1):
                                 openpyxl_row = r - 1
-                                meta = sheet.get_image_meta_for_row(openpyxl_row)
+                                meta = sheet.get_image_meta_for_row(
+                                    openpyxl_row)
                                 if meta:
-                                    b64 = image_store.get_image_base64(meta.sheet_name, meta.index)
+                                    b64 = image_store.get_image_base64(
+                                        meta.sheet_name, meta.index)
                                     if b64:
                                         product.excel_image = b64
                                     break
@@ -3151,10 +3310,13 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
 
             # Update progress
             progress = (batch_idx + 1) / num_batches
-            progress_bar.progress(progress, text=f"Processed batch {batch_idx + 1}/{num_batches} ({total_products} products)")
+            progress_bar.progress(
+                progress, text=f"Processed batch {batch_idx + 1}/{num_batches} ({total_products} products)")
 
-        progress_bar.progress(1.0, text=f"✅ Done: {total_products} products extracted!")
-        status.update(label=f"✅ Extracted {total_products} products from {total_rows} rows", state="complete")
+        progress_bar.progress(
+            1.0, text=f"✅ Done: {total_products} products extracted!")
+        status.update(
+            label=f"✅ Extracted {total_products} products from {total_rows} rows", state="complete")
 
     st.rerun()
 
@@ -3297,9 +3459,15 @@ def render_excel_export_view():
                         import warnings
                         import os
                         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-                        with warnings.catch_warnings():
-                            warnings.filterwarnings("ignore")
-                            import rembg
+                        os.environ['ORT_LOGGING_LEVEL'] = '3'
+                        try:
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore")
+                                import rembg
+                        except ImportError:
+                            st.error(
+                                "rembg is not installed. Run: pip install rembg")
+                            st.stop()
                         from PIL import Image
                         import io
 
@@ -3324,7 +3492,8 @@ def render_excel_export_view():
                 excel_bytes = excel_exporter.export_products_to_excel(
                     products=products_to_export,
                     schema_fields=schema_fields,
-                    computed_fields=st.session_state.get('computed_fields', []),
+                    computed_fields=st.session_state.get(
+                        'computed_fields', []),
                     include_images=include_images,
                     include_page_info=False,
                     include_row_info=include_row_info

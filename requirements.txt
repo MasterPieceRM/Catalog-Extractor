@@ -19,3 +19,6 @@ openpyxl>=3.1.0
 python-dotenv>=1.0.0
 tenacity>=8.2.0
 xlrd
+
+# Background removal
+rembg>=2.0.0
