@@ -231,7 +231,8 @@ class LLMExtractor:
         data_text: str,
         batch_num: int,
         schema_fields: List[Dict[str, Any]] = None,
-        layout_context: str = "",
+        rows_per_product: int = 1,
+        row_descriptions: List[str] = None,
         headers: List[str] = None,
     ) -> List[Product]:
         """
@@ -241,7 +242,8 @@ class LLMExtractor:
             data_text: Formatted text representation of spreadsheet rows
             batch_num: Batch number for tracking
             schema_fields: List of schema field dicts with name, type, description, hint
-            layout_context: Optional description of the sheet layout
+            rows_per_product: Number of consecutive rows that make up one product
+            row_descriptions: Description of what each row within a product group contains
             headers: Column headers for reference
         """
         # Build field descriptions with hints
@@ -249,18 +251,15 @@ class LLMExtractor:
         if schema_fields:
             for field in schema_fields:
                 field_name = field.get('name', 'unknown')
-                req = "REQUIRED" if field.get('required') else "optional"
-                field_type = field.get('type', 'text')
-                desc = field.get('description', '')
                 hint = field.get('hint', '')
 
-                field_line = f"  • {field_name} ({req}, {field_type}): {desc}"
+                field_line = f"  • {field_name}"
                 if hint:
                     field_line += f"\n      → EXTRACTION HINT: {hint}"
                 field_lines.append(field_line)
 
         if not field_lines:
-            field_lines = ["  • name (REQUIRED, text): Product name"]
+            field_lines = ["  • name"]
 
         fields_str = "\n".join(field_lines)
 
@@ -270,10 +269,15 @@ class LLMExtractor:
             ""
         ]
 
-        if layout_context and layout_context.strip():
-            prompt_parts.append("=== SHEET LAYOUT DESCRIPTION ===")
-            prompt_parts.append(layout_context.strip())
-            prompt_parts.append("")
+        # Add row structure context
+        prompt_parts.append("=== ROW STRUCTURE ===")
+        prompt_parts.append(
+            f"Each product spans {rows_per_product} consecutive row(s).")
+        if row_descriptions:
+            for i, desc in enumerate(row_descriptions):
+                if desc and desc.strip():
+                    prompt_parts.append(f"  Row {i + 1}: {desc.strip()}")
+        prompt_parts.append("")
 
         prompt_parts.extend([
             "=== FIELDS TO EXTRACT ===",
@@ -295,7 +299,7 @@ class LLMExtractor:
             "2. Follow the EXTRACTION HINTS carefully — they describe transformations, calculations, and special handling",
             "3. If a hint says to apply a discount, calculate the discounted value",
             "4. If a hint says to combine columns, do so exactly as described",
-            "5. If multiple rows belong to the same product, merge them into one product",
+            f"5. Each product occupies exactly {rows_per_product} consecutive row(s) — group them accordingly and merge into one product",
             "6. If a field value is not found, omit it (do not guess or invent values)",
             "7. Preserve exact text for SKUs, codes, references as they appear",
             "8. Return ONLY valid JSON, no explanations",
@@ -355,8 +359,7 @@ class LLMExtractor:
         field_info = []
         for f in schema_fields:
             hint = f.get('hint', '')
-            desc = f.get('description', '')
-            line = f"  - {f['name']} ({f.get('type','text')}): {desc}"
+            line = f"  - {f['name']}"
             if hint:
                 line += f" [HINT: {hint}]"
             field_info.append(line)

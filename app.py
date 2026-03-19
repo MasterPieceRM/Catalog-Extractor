@@ -122,21 +122,22 @@ def evaluate_computed_fields(product, computed_fields: list):
 
     # We'll just inspect the product object
     try:
-        # 1. Add direct attributes
-        for attr in dir(product):
-            if not attr.startswith('_') and not callable(getattr(product, attr)):
-                val = getattr(product, attr)
-                # Handle price objects specially if needed
-                if attr == 'price' and hasattr(val, 'amount'):
-                    val = val.amount
+        # 1. Add direct model fields (use class-level registry to avoid Pydantic deprecation warnings)
+        for attr in type(product).model_fields:
+            if attr.startswith('_'):
+                continue
+            val = getattr(product, attr, None)
+            # Handle price objects specially if needed
+            if attr == 'price' and hasattr(val, 'amount'):
+                val = val.amount
 
-                # Convert to numeric if possible (for math operations)
-                if val is not None:
-                    try:
-                        context[attr] = float(str(val).replace(
-                            ',', '').replace('$', '').strip())
-                    except:
-                        context[attr] = val
+            # Convert to numeric if possible (for math operations)
+            if val is not None:
+                try:
+                    context[attr] = float(str(val).replace(
+                        ',', '').replace('$', '').strip())
+                except:
+                    context[attr] = val
 
         # 2. Add raw attributes (which cover schema fields)
         if hasattr(product, 'raw_attributes') and product.raw_attributes:
@@ -237,7 +238,10 @@ def init_session_state():
         'excel_preview_cache': None,  # Cached preview DataFrame
         'excel_preview_cache_key': None,  # Cache key for invalidation
         'excel_include_images': True,  # Whether to extract images with products
-        'excel_llm_batch_size': 20,  # Number of rows per LLM batch
+        'excel_llm_batch_size': 5,  # Number of products per LLM batch
+        'excel_rows_per_product': 1,  # How many rows span a single product
+        # Description of what each row contains
+        'excel_row_descriptions': [''],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -688,8 +692,10 @@ def render_product_preview(product, idx: int, page_num: int):
                             try:
                                 session = _load_rembg_session()
                                 if not session or isinstance(session, tuple):
-                                    msg = session[1] if isinstance(session, tuple) else "rembg not available."
-                                    st.error(f"✂️ Background removal unavailable: {msg}")
+                                    msg = session[1] if isinstance(
+                                        session, tuple) else "rembg not available."
+                                    st.error(
+                                        f"✂️ Background removal unavailable: {msg}")
                                     st.stop()
                                 from PIL import Image
                                 import io
@@ -1726,18 +1732,16 @@ def delete_schema_field(field_name: str):
 
 def update_schema_field(old_name: str, idx: int):
     """Callback to update a schema field from input widgets"""
-    # Get values from session state widgets
     new_name = st.session_state.get(
         f"edit_name_{old_name}", old_name).lower().replace(" ", "_")
-    new_type = st.session_state.get(f"edit_type_{old_name}", "text")
-    new_desc = st.session_state.get(f"edit_desc_{old_name}", "")
-    new_req = st.session_state.get(f"edit_req_{old_name}", False)
 
-    # Preserve existing hint
+    # Preserve existing hint and type
     current_hint = ""
+    current_type = "text"
     for f in st.session_state.schema_fields:
         if f['name'] == old_name:
             current_hint = f.get('hint', '')
+            current_type = f.get('type', 'text')
             break
 
     # Check for duplicate names (excluding self and computed fields)
@@ -1750,12 +1754,9 @@ def update_schema_field(old_name: str, idx: int):
         st.session_state.edit_error = f"Field name '{new_name}' already exists!"
         return
 
-    # Update the field (preserve hint)
     st.session_state.schema_fields[idx] = {
         "name": new_name,
-        "type": new_type,
-        "description": new_desc,
-        "required": new_req,
+        "type": current_type,
         "hint": current_hint
     }
     st.session_state.edit_error = None
@@ -1940,16 +1941,64 @@ def render_schema_config():
 
     # ===== PAGE/SHEET LAYOUT CONTEXT =====
     if is_excel_mode:
-        st.markdown("### 📊 Sheet Layout Description")
+        st.markdown("### 📊 Rows Per Product")
         st.caption(
-            "Describe the overall structure of your Excel sheet to help the AI understand the data layout")
-        layout_placeholder = """Example:
-- Each row represents one product
-- Column A contains product images
-- Column B has SKU codes
-- Prices are in Column E (wholesale) and Column F (retail)
-- Some products span multiple rows (grouped by style)
-- Header row is row 1, data starts at row 2"""
+            "How many consecutive rows in the sheet represent a single product?")
+
+        rows_per_product = st.number_input(
+            "Rows per product",
+            min_value=1,
+            max_value=20,
+            value=st.session_state.get('excel_rows_per_product', 1),
+            step=1,
+            key="excel_rows_per_product_input",
+            label_visibility="collapsed",
+        )
+
+        if rows_per_product != st.session_state.get('excel_rows_per_product', 1):
+            # Resize the descriptions list to match
+            current_descs = st.session_state.get(
+                'excel_row_descriptions', [''])
+            if rows_per_product > len(current_descs):
+                current_descs = current_descs + \
+                    [''] * (rows_per_product - len(current_descs))
+            else:
+                current_descs = current_descs[:rows_per_product]
+            st.session_state.excel_rows_per_product = rows_per_product
+            st.session_state.excel_row_descriptions = current_descs
+
+        # Ensure descriptions list matches current rows_per_product
+        current_descs = st.session_state.get('excel_row_descriptions', [''])
+        rpp = st.session_state.get('excel_rows_per_product', 1)
+        if len(current_descs) != rpp:
+            if rpp > len(current_descs):
+                current_descs = current_descs + \
+                    [''] * (rpp - len(current_descs))
+            else:
+                current_descs = current_descs[:rpp]
+            st.session_state.excel_row_descriptions = current_descs
+
+        if rpp > 1:
+            st.caption(
+                "Describe what data each row within a product group contains:")
+        else:
+            st.caption(
+                "Optionally describe what the single product row contains:")
+
+        new_descs = list(current_descs)
+        for row_i in range(rpp):
+            new_val = st.text_input(
+                f"Row {row_i + 1}",
+                value=current_descs[row_i] if row_i < len(
+                    current_descs) else '',
+                key=f"excel_row_desc_{row_i}",
+                placeholder=f"What is on row {row_i + 1}? (e.g. product name, SKU, price...)",
+            )
+            new_descs[row_i] = new_val
+
+        if new_descs != st.session_state.get('excel_row_descriptions', ['']):
+            st.session_state.excel_row_descriptions = new_descs
+
     else:
         st.markdown("### 📄 Page Layout Description")
         st.caption(
@@ -1961,17 +2010,17 @@ def render_schema_config():
 - Prices are shown as 'Wholesale: $X.XX' and 'Retail: $X.XX'
 - Color codes are abbreviated (BLK=Black, WHT=White, etc.)"""
 
-    page_context = st.text_area(
-        "Layout Context",
-        value=st.session_state.get('page_layout_context', ''),
-        height=120,
-        placeholder=layout_placeholder,
-        key="page_layout_input",
-        label_visibility="collapsed"
-    )
+        page_context = st.text_area(
+            "Layout Context",
+            value=st.session_state.get('page_layout_context', ''),
+            height=120,
+            placeholder=layout_placeholder,
+            key="page_layout_input",
+            label_visibility="collapsed"
+        )
 
-    if page_context != st.session_state.get('page_layout_context', ''):
-        st.session_state.page_layout_context = page_context
+        if page_context != st.session_state.get('page_layout_context', ''):
+            st.session_state.page_layout_context = page_context
 
     # ===== IMAGE POSITION HINT (PDF only) =====
     if not is_excel_mode:
@@ -2006,7 +2055,7 @@ def render_schema_config():
 
         with st.container():
             # Field header row
-            col1, col2, col3, col4, col5 = st.columns([2, 1, 2, 0.8, 0.5])
+            col1, col2 = st.columns([5, 0.5])
 
             with col1:
                 st.text_input(
@@ -2019,36 +2068,6 @@ def render_schema_config():
                     placeholder="Field name"
                 )
             with col2:
-                st.selectbox(
-                    "Type",
-                    ["text", "number", "boolean", "list"],
-                    index=["text", "number", "boolean", "list"].index(
-                        field.get('type', 'text')),
-                    key=f"edit_type_{field_name}",
-                    on_change=update_schema_field,
-                    args=(field_name, idx),
-                    label_visibility="collapsed"
-                )
-            with col3:
-                st.text_input(
-                    "Description",
-                    value=field.get('description', ''),
-                    key=f"edit_desc_{field_name}",
-                    on_change=update_schema_field,
-                    args=(field_name, idx),
-                    label_visibility="collapsed",
-                    placeholder="What is this field"
-                )
-            with col4:
-                st.checkbox(
-                    "Req",
-                    value=field.get('required', False),
-                    key=f"edit_req_{field_name}",
-                    on_change=update_schema_field,
-                    args=(field_name, idx),
-                    help="Required field"
-                )
-            with col5:
                 st.button(
                     "🗑️",
                     key=f"remove_field_{field_name}",
@@ -2112,83 +2131,62 @@ def render_schema_config():
 
     computed_fields = st.session_state.get('computed_fields', [])
 
-    # Display existing computed fields
-    if computed_fields:
-        for idx, field in enumerate(computed_fields):
-            with st.container():
-                col1, col2, col3 = st.columns([2, 4, 0.5])
-                with col1:
-                    st.text_input(
-                        "Name",
-                        value=field['name'],
-                        key=f"comp_name_{idx}",
-                        disabled=True,
-                        label_visibility="collapsed"
-                    )
-                with col2:
-                    new_formula = st.text_input(
-                        "Formula",
-                        value=field['formula'],
-                        key=f"comp_formula_{idx}",
-                        label_visibility="collapsed",
-                        placeholder="e.g. {price} * 1.2"
-                    )
-                    if new_formula != field['formula']:
-                        field['formula'] = new_formula
-                with col3:
-                    if st.button("🗑️", key=f"del_comp_{idx}", help="Delete computed field"):
-                        st.session_state.computed_fields.pop(idx)
-                        st.rerun()
-
-    # Add new computed field
-    with st.container():
-        st.write("Add New Computed Field")
-        col1, col2, col3 = st.columns([2, 4, 1])
-        with col1:
-            new_comp_name = st.text_input(
-                "Name", key="new_comp_name", placeholder="total_price", label_visibility="collapsed")
-        with col2:
-            new_comp_formula = st.text_input(
-                "Formula", key="new_comp_formula", placeholder="{price} * {quantity}", label_visibility="collapsed")
-        with col3:
-            if st.button("➕ Add", key="add_comp_btn"):
-                if new_comp_name and new_comp_formula:
-                    # simplistic validation
-                    clean_name = new_comp_name.lower().replace(" ", "_")
-
-                    # Check duplicates
+    # Display existing computed fields — all inline-editable
+    for idx, field in enumerate(computed_fields):
+        with st.container():
+            col1, col2, col3 = st.columns([2, 4, 0.5])
+            with col1:
+                new_name = st.text_input(
+                    "Name",
+                    value=field['name'],
+                    key=f"comp_name_{idx}",
+                    label_visibility="collapsed",
+                    placeholder="field_name"
+                )
+                if new_name != field['name']:
+                    clean = new_name.lower().replace(" ", "_")
                     all_names = [f['name'] for f in st.session_state.schema_fields] + \
-                                [f['name'] for f in computed_fields]
+                                [f['name'] for i2, f in enumerate(
+                                    computed_fields) if i2 != idx]
+                    if clean and clean not in all_names:
+                        field['name'] = clean
+            with col2:
+                new_formula = st.text_input(
+                    "Formula",
+                    value=field['formula'],
+                    key=f"comp_formula_{idx}",
+                    label_visibility="collapsed",
+                    placeholder="e.g. {price} * 1.2"
+                )
+                if new_formula != field['formula']:
+                    field['formula'] = new_formula
+            with col3:
+                if st.button("🗑️", key=f"del_comp_{idx}", help="Delete computed field"):
+                    st.session_state.computed_fields.pop(idx)
+                    st.rerun()
+            st.markdown("---")
 
-                    if clean_name in all_names:
-                        st.error(f"Field '{clean_name}' already exists")
-                    else:
-                        st.session_state.computed_fields.append({
-                            "name": clean_name,
-                            "formula": new_comp_formula
-                        })
-                        st.rerun()
-                else:
-                    st.warning("Name and Formula required")
+    # Add new computed field — one click creates the row, user fills in details above
+    if st.button("➕ Add Computed Field", key="add_comp_btn"):
+        all_names = [f['name'] for f in st.session_state.schema_fields] + \
+                    [f['name'] for f in computed_fields]
+        base = "computed_field"
+        n = 1
+        new_name = base
+        while new_name in all_names:
+            new_name = f"{base}_{n}"
+            n += 1
+        st.session_state.computed_fields.append(
+            {"name": new_name, "formula": ""})
+        st.rerun()
 
     st.divider()
 
     # ===== ADD NEW FIELD =====
     st.markdown("### ➕ Add New Field")
 
-    col1, col2, col3, col4 = st.columns([2, 1, 3, 1])
-
-    with col1:
-        new_field_name = st.text_input(
-            "Field Name", key="new_field_name", placeholder="e.g., size, color, weight")
-    with col2:
-        new_field_type = st.selectbox(
-            "Type", ["text", "number", "boolean", "list"], key="new_field_type")
-    with col3:
-        new_field_desc = st.text_input(
-            "Description", key="new_field_desc", placeholder="What this field contains")
-    with col4:
-        new_field_req = st.checkbox("Required", key="new_field_req")
+    new_field_name = st.text_input(
+        "Field Name", key="new_field_name", placeholder="e.g., size, color, weight")
 
     if st.button("➕ Add Field", width="stretch"):
         if new_field_name:
@@ -2199,11 +2197,8 @@ def render_schema_config():
             else:
                 st.session_state.schema_fields.append({
                     "name": new_field_name.lower().replace(" ", "_"),
-                    "type": new_field_type,
-                    "required": new_field_req,
-                    "description": new_field_desc,
+                    "type": "text",
                     "hint": "",
-                    "formula": ""
                 })
                 st.success(f"Added field: {new_field_name}")
                 st.rerun()
@@ -2285,12 +2280,9 @@ def get_schema_prompt():
     for field in fields:
         try:
             field_name = field.get('name', 'unknown')
-            req = "REQUIRED" if field.get('required') else "optional"
-            field_type = field.get('type', 'text')
-            desc = field.get('description', '')
             hint = field.get('hint', '')
 
-            field_line = f"  • {field_name} ({req}, {field_type}): {desc}"
+            field_line = f"  • {field_name}"
             if hint:
                 field_line += f"\n      → EXTRACTION HINT: {hint}"
             field_lines.append(field_line)
@@ -2298,7 +2290,7 @@ def get_schema_prompt():
             continue
 
     if not field_lines:
-        field_lines = ["  • name (REQUIRED, text): Product name"]
+        field_lines = ["  • name"]
 
     fields_str = "\n".join(field_lines)
 
@@ -2358,19 +2350,17 @@ def get_excel_schema_prompt():
     if not fields:
         fields = DEFAULT_SCHEMA_FIELDS.copy()
 
-    layout_context = st.session_state.get('page_layout_context', '')
+    rows_per_product = st.session_state.get('excel_rows_per_product', 1)
+    row_descriptions = st.session_state.get('excel_row_descriptions', [''])
 
     # Build field descriptions with hints
     field_lines = []
     for field in fields:
         try:
             field_name = field.get('name', 'unknown')
-            req = "REQUIRED" if field.get('required') else "optional"
-            field_type = field.get('type', 'text')
-            desc = field.get('description', '')
             hint = field.get('hint', '')
 
-            field_line = f"  • {field_name} ({req}, {field_type}): {desc}"
+            field_line = f"  • {field_name}"
             if hint:
                 field_line += f"\n      → EXTRACTION HINT: {hint}"
             field_lines.append(field_line)
@@ -2378,7 +2368,7 @@ def get_excel_schema_prompt():
             continue
 
     if not field_lines:
-        field_lines = ["  • name (REQUIRED, text): Product name"]
+        field_lines = ["  • name"]
 
     fields_str = "\n".join(field_lines)
 
@@ -2388,11 +2378,14 @@ def get_excel_schema_prompt():
         ""
     ]
 
-    # Add sheet layout context if provided
-    if layout_context.strip():
-        prompt_parts.append("=== SHEET LAYOUT DESCRIPTION ===")
-        prompt_parts.append(layout_context.strip())
-        prompt_parts.append("")
+    # Add row structure context
+    prompt_parts.append("=== ROW STRUCTURE ===")
+    prompt_parts.append(
+        f"Each product spans {rows_per_product} consecutive row(s).")
+    for i, desc in enumerate(row_descriptions):
+        if desc and desc.strip():
+            prompt_parts.append(f"  Row {i + 1}: {desc.strip()}")
+    prompt_parts.append("")
 
     prompt_parts.extend([
         "=== FIELDS TO EXTRACT ===",
@@ -2407,7 +2400,7 @@ def get_excel_schema_prompt():
         "=== EXTRACTION RULES ===",
         "1. Analyze the column headers and sample data to understand the mapping",
         "2. Determine which columns map to which extraction fields",
-        "3. Identify any row grouping patterns (one product per row vs multiple rows per product)",
+        f"3. Each product occupies exactly {rows_per_product} consecutive row(s) — group them accordingly",
         "4. Note any transformations needed (e.g., combining columns, parsing values)",
         "5. Return a column mapping that can be applied to all rows",
         "",
@@ -2817,13 +2810,19 @@ def render_excel_extraction_view():
 
     # LLM options
     with st.expander("⚙️ LLM Options", expanded=False):
+        _rpp = st.session_state.get('excel_rows_per_product', 1)
+        _max_products = max(1, 50 // _rpp)
+        _default_products = min(5, _max_products)
+        _current_products = min(
+            st.session_state.get('excel_llm_batch_size', _default_products), _max_products)
+        _rows_in_batch = _current_products * _rpp
         st.number_input(
-            "Rows per batch",
+            "Products per batch",
             min_value=1,
-            max_value=50,
-            value=st.session_state.get('excel_llm_batch_size', 20),
+            max_value=_max_products,
+            value=_current_products,
             step=1,
-            help="Number of rows sent to the AI per batch. Smaller = more accurate, larger = faster. For multi-row products, use a multiple of row count per product.",
+            help=f"Number of products sent to the AI per batch ({_rpp} row(s) each → {_rows_in_batch} rows per batch). Max {_max_products} products to stay under the 50-row limit.",
             key="_llm_batch_size_widget",
             on_change=lambda: setattr(
                 st.session_state, 'excel_llm_batch_size', st.session_state._llm_batch_size_widget)
@@ -2831,15 +2830,20 @@ def render_excel_extraction_view():
 
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
+        _rpp_btn = st.session_state.get('excel_rows_per_product', 1)
+        _max_products_btn = max(1, 50 // _rpp_btn)
+        _products_per_batch = min(st.session_state.get(
+            'excel_llm_batch_size', 5), _max_products_btn)
+        _rows_per_batch = _products_per_batch * _rpp_btn
         if st.button(
             f"🧠 Extract rows {start_row}-{end_row} with LLM",
             type="primary",
             key="llm_extract_btn",
-            help=f"Send {end_row - start_row + 1} rows in batches of {st.session_state.excel_llm_batch_size} to the AI"
+            help=f"Send {end_row - start_row + 1} rows in batches of {_rows_per_batch} rows ({_products_per_batch} products) to the AI"
         ):
             do_llm_excel_extraction(
                 sheet, start_row, end_row,
-                st.session_state.excel_llm_batch_size,
+                _rows_per_batch,
                 st.session_state.excel_include_images
             )
 
@@ -2901,8 +2905,10 @@ def render_excel_product_card(product: Product, idx: int):
                             try:
                                 session = _load_rembg_session()
                                 if not session or isinstance(session, tuple):
-                                    msg = session[1] if isinstance(session, tuple) else "rembg not available."
-                                    st.error(f"✂️ Background removal unavailable: {msg}")
+                                    msg = session[1] if isinstance(
+                                        session, tuple) else "rembg not available."
+                                    st.error(
+                                        f"✂️ Background removal unavailable: {msg}")
                                     st.stop()
                                 from PIL import Image
                                 import io
@@ -3159,7 +3165,8 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
     extractor = LLMExtractor()
     schema_fields = st.session_state.get(
         'schema_fields', DEFAULT_SCHEMA_FIELDS)
-    layout_context = st.session_state.get('page_layout_context', '')
+    rows_per_product = st.session_state.get('excel_rows_per_product', 1)
+    row_descriptions = st.session_state.get('excel_row_descriptions', [''])
 
     # Build image index if needed
     image_store = None
@@ -3203,7 +3210,8 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                     data_text=data_text,
                     batch_num=batch_idx + 1,
                     schema_fields=schema_fields,
-                    layout_context=layout_context,
+                    rows_per_product=rows_per_product,
+                    row_descriptions=row_descriptions,
                     headers=sheet.headers,
                 )
 
@@ -3483,8 +3491,10 @@ def render_excel_export_view():
                         import os
                         session = _load_rembg_session()
                         if not session or isinstance(session, tuple):
-                            msg = session[1] if isinstance(session, tuple) else "rembg not available."
-                            st.error(f"✂️ Background removal unavailable: {msg}")
+                            msg = session[1] if isinstance(
+                                session, tuple) else "rembg not available."
+                            st.error(
+                                f"✂️ Background removal unavailable: {msg}")
                             st.stop()
                         from PIL import Image
                         import io
