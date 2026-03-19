@@ -32,20 +32,23 @@ st.set_page_config(
 sys.path.insert(0, str(Path(__file__).parent))
 
 
-@st.cache_resource(show_spinner="⏳ Loading background removal model (first run only)...")
+@st.cache_resource(show_spinner="⏳ Loading background removal model...")
 def _load_rembg_session():
-    """Pre-download and cache the rembg u2net model at startup."""
+    """Load the rembg silueta model from the bundled models/ directory."""
     try:
         import warnings
         import os
+        # Point rembg to the bundled model — no network download needed
+        models_dir = str(Path(__file__).parent / "models")
+        os.environ['U2NET_HOME'] = models_dir
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
         os.environ['ORT_LOGGING_LEVEL'] = '3'
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             import rembg
-            return rembg.new_session("u2net")
+            return rembg.new_session("silueta")
     except Exception as e:
-        return None  # rembg not installed or download failed
+        return None  # rembg not installed or model missing
 
 
 _rembg_session = _load_rembg_session()
