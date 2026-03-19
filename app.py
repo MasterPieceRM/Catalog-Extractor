@@ -34,12 +34,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 @st.cache_resource(show_spinner="⏳ Loading background removal model...")
 def _load_rembg_session():
-    """Load the rembg silueta model from the bundled models/ directory."""
-    try:
-        import warnings
-        import os
-        # Point rembg to the bundled model — no network download needed
+    """Load the rembg silueta model with a timeout to avoid freezing on cloud."""
+    import concurrent.futures
+    import warnings
+    import os
+
+    def _do_load():
         models_dir = str(Path(__file__).parent / "models")
+        # Verify model file exists before attempting to load
+        model_path = os.path.join(models_dir, "silueta.onnx")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
         os.environ['U2NET_HOME'] = models_dir
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
         os.environ['ORT_LOGGING_LEVEL'] = '3'
@@ -47,8 +52,16 @@ def _load_rembg_session():
             warnings.simplefilter("ignore")
             import rembg
             return rembg.new_session("silueta")
-    except Exception as e:
-        return None  # rembg not installed or model missing
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_load)
+        try:
+            return future.result(timeout=45)
+        except concurrent.futures.TimeoutError:
+            return ("timeout", "Background removal model took too long to load. "
+                    "This feature may not be available in the deployed environment.")
+        except Exception as e:
+            return ("error", str(e))
 
 
 # Default extraction schema fields with extraction hints
@@ -674,9 +687,9 @@ def render_product_preview(product, idx: int, page_num: int):
                         with st.spinner("Removing background..."):
                             try:
                                 session = _load_rembg_session()
-                                if session is None:
-                                    st.error(
-                                        "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
+                                if not session or isinstance(session, tuple):
+                                    msg = session[1] if isinstance(session, tuple) else "rembg not available."
+                                    st.error(f"✂️ Background removal unavailable: {msg}")
                                     st.stop()
                                 from PIL import Image
                                 import io
@@ -2887,9 +2900,9 @@ def render_excel_product_card(product: Product, idx: int):
                         with st.spinner("Removing background..."):
                             try:
                                 session = _load_rembg_session()
-                                if session is None:
-                                    st.error(
-                                        "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
+                                if not session or isinstance(session, tuple):
+                                    msg = session[1] if isinstance(session, tuple) else "rembg not available."
+                                    st.error(f"✂️ Background removal unavailable: {msg}")
                                     st.stop()
                                 from PIL import Image
                                 import io
@@ -3469,9 +3482,9 @@ def render_excel_export_view():
                         import warnings
                         import os
                         session = _load_rembg_session()
-                        if session is None:
-                            st.error(
-                                "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
+                        if not session or isinstance(session, tuple):
+                            msg = session[1] if isinstance(session, tuple) else "rembg not available."
+                            st.error(f"✂️ Background removal unavailable: {msg}")
                             st.stop()
                         from PIL import Image
                         import io
