@@ -51,8 +51,6 @@ def _load_rembg_session():
         return None  # rembg not installed or model missing
 
 
-
-
 # Default extraction schema fields with extraction hints
 DEFAULT_SCHEMA_FIELDS = [
     {"name": "name", "type": "text", "required": True,
