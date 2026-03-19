@@ -51,7 +51,6 @@ def _load_rembg_session():
         return None  # rembg not installed or model missing
 
 
-_rembg_session = _load_rembg_session()
 
 
 # Default extraction schema fields with extraction hints
@@ -676,7 +675,8 @@ def render_product_preview(product, idx: int, page_num: int):
                     if product.images and product.images[0].image_data:
                         with st.spinner("Removing background..."):
                             try:
-                                if _rembg_session is None:
+                                session = _load_rembg_session()
+                                if session is None:
                                     st.error(
                                         "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                                     st.stop()
@@ -693,7 +693,7 @@ def render_product_preview(product, idx: int, page_num: int):
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
                                     output_img = rembg.remove(
-                                        input_img, session=_rembg_session)
+                                        input_img, session=session)
 
                                 # Process to properly handle transparency
                                 output_buffer = io.BytesIO()
@@ -2888,8 +2888,8 @@ def render_excel_product_card(product: Product, idx: int):
                     if st.button("✂️ Remove BG", key=f"excel_rembg_{idx}"):
                         with st.spinner("Removing background..."):
                             try:
-                                import warnings
-                                if _rembg_session is None:
+                                session = _load_rembg_session()
+                                if session is None:
                                     st.error(
                                         "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                                     st.stop()
@@ -2904,7 +2904,7 @@ def render_excel_product_card(product: Product, idx: int):
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
                                     output_img = rembg.remove(
-                                        input_img, session=_rembg_session)
+                                        input_img, session=session)
                                 output_buffer = io.BytesIO()
                                 output_img.save(output_buffer, format='PNG')
                                 product.excel_image = base64.b64encode(
@@ -3470,7 +3470,8 @@ def render_excel_export_view():
                             0, text="Removing backgrounds...")
                         import warnings
                         import os
-                        if _rembg_session is None:
+                        session = _load_rembg_session()
+                        if session is None:
                             st.error(
                                 "rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                             st.stop()
@@ -3486,7 +3487,7 @@ def render_excel_export_view():
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
                                     output_img = rembg.remove(
-                                        input_img, session=_rembg_session)
+                                        input_img, session=session)
                                 output_buffer = io.BytesIO()
                                 output_img.save(output_buffer, format='PNG')
                                 p.excel_image = base64.b64encode(
