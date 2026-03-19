@@ -32,6 +32,25 @@ st.set_page_config(
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+@st.cache_resource(show_spinner="⏳ Loading background removal model (first run only)...")
+def _load_rembg_session():
+    """Pre-download and cache the rembg u2net model at startup."""
+    try:
+        import warnings
+        import os
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+        os.environ['ORT_LOGGING_LEVEL'] = '3'
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import rembg
+            return rembg.new_session("u2net")
+    except Exception as e:
+        return None  # rembg not installed or download failed
+
+
+_rembg_session = _load_rembg_session()
+
+
 # Default extraction schema fields with extraction hints
 DEFAULT_SCHEMA_FIELDS = [
     {"name": "name", "type": "text", "required": True,
@@ -654,30 +673,22 @@ def render_product_preview(product, idx: int, page_num: int):
                     if product.images and product.images[0].image_data:
                         with st.spinner("Removing background..."):
                             try:
-                                import warnings
-                                import os
-                                os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-                                os.environ['ORT_LOGGING_LEVEL'] = '3'
-                                try:
-                                    with warnings.catch_warnings():
-                                        warnings.simplefilter("ignore")
-                                        import rembg
-                                except ImportError:
-                                    st.error(
-                                        "rembg is not installed. Run: pip install rembg")
+                                if _rembg_session is None:
+                                    st.error("rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                                     st.stop()
                                 from PIL import Image
                                 import io
-
                                 # Decode
                                 img_data = base64.b64decode(
                                     product.images[0].image_data)
                                 input_img = Image.open(io.BytesIO(img_data))
 
-                                # Remove BG
+                                # Remove BG using pre-loaded session
+                                import warnings
+                                import rembg
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(input_img)
+                                    output_img = rembg.remove(input_img, session=_rembg_session)
 
                                 # Process to properly handle transparency
                                 output_buffer = io.BytesIO()
@@ -2873,16 +2884,8 @@ def render_excel_product_card(product: Product, idx: int):
                         with st.spinner("Removing background..."):
                             try:
                                 import warnings
-                                import os
-                                os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-                                os.environ['ORT_LOGGING_LEVEL'] = '3'
-                                try:
-                                    with warnings.catch_warnings():
-                                        warnings.simplefilter("ignore")
-                                        import rembg
-                                except ImportError:
-                                    st.error(
-                                        "rembg is not installed. Run: pip install rembg")
+                                if _rembg_session is None:
+                                    st.error("rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                                     st.stop()
                                 from PIL import Image
                                 import io
@@ -2890,9 +2893,11 @@ def render_excel_product_card(product: Product, idx: int):
                                 img_data = base64.b64decode(
                                     product.excel_image)
                                 input_img = Image.open(io.BytesIO(img_data))
+                                import warnings
+                                import rembg
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(input_img)
+                                    output_img = rembg.remove(input_img, session=_rembg_session)
                                 output_buffer = io.BytesIO()
                                 output_img.save(output_buffer, format='PNG')
                                 product.excel_image = base64.b64encode(
@@ -3458,18 +3463,13 @@ def render_excel_export_view():
                             0, text="Removing backgrounds...")
                         import warnings
                         import os
-                        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-                        os.environ['ORT_LOGGING_LEVEL'] = '3'
-                        try:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter("ignore")
-                                import rembg
-                        except ImportError:
-                            st.error(
-                                "rembg is not installed. Run: pip install rembg")
+                        if _rembg_session is None:
+                            st.error("rembg model is not available. Check that rembg is installed and the model downloaded correctly.")
                             st.stop()
                         from PIL import Image
                         import io
+                        import warnings
+                        import rembg
 
                         for i, p in enumerate(products_with_images):
                             try:
@@ -3477,7 +3477,7 @@ def render_excel_export_view():
                                 input_img = Image.open(io.BytesIO(img_data))
                                 with warnings.catch_warnings():
                                     warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(input_img)
+                                    output_img = rembg.remove(input_img, session=_rembg_session)
                                 output_buffer = io.BytesIO()
                                 output_img.save(output_buffer, format='PNG')
                                 p.excel_image = base64.b64encode(
