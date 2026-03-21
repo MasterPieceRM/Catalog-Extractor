@@ -46,7 +46,6 @@ class ExcelExporter:
         include_images: bool = True,
         image_size: str = 'medium',
         include_page_info: bool = True,
-        remove_bg: bool = False,
         include_row_info: bool = False,
         computed_fields: List[Dict[str, str]] = None
     ) -> bytes:
@@ -57,7 +56,6 @@ class ExcelExporter:
             computed_fields: List of dicts with 'name' and 'formula' keys.
                              Example: [{'name': 'total', 'formula': '{price}*2'}]
         """
-        # Note: rembg is imported inside the loop with warning suppression if remove_bg is True
 
         wb = Workbook()
         ws = wb.active
@@ -113,21 +111,6 @@ class ExcelExporter:
                 ws.row_dimensions[current_row].height = row_height
 
                 product_image = self._get_product_image(product)
-
-                # Apply background removal if requested
-                if product_image and remove_bg:
-                    try:
-                        # Suppress ONNX Runtime and Numba warnings
-                        import warnings
-                        import os
-                        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")
-                            import rembg
-                            product_image = rembg.remove(product_image)
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to remove background in export: {e}")
 
                 if product_image:
                     try:

@@ -32,38 +32,6 @@ st.set_page_config(
 sys.path.insert(0, str(Path(__file__).parent))
 
 
-@st.cache_resource(show_spinner="⏳ Loading background removal model...")
-def _load_rembg_session():
-    """Load the rembg silueta model with a timeout to avoid freezing on cloud."""
-    import concurrent.futures
-    import warnings
-    import os
-
-    def _do_load():
-        models_dir = str(Path(__file__).parent / "models")
-        # Verify model file exists before attempting to load
-        model_path = os.path.join(models_dir, "silueta.onnx")
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
-        os.environ['U2NET_HOME'] = models_dir
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-        os.environ['ORT_LOGGING_LEVEL'] = '3'
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            import rembg
-            return rembg.new_session("silueta")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_do_load)
-        try:
-            return future.result(timeout=45)
-        except concurrent.futures.TimeoutError:
-            return ("timeout", "Background removal model took too long to load. "
-                    "This feature may not be available in the deployed environment.")
-        except Exception as e:
-            return ("error", str(e))
-
-
 # Default extraction schema fields with extraction hints
 DEFAULT_SCHEMA_FIELDS = [
     {"name": "name", "type": "text", "required": True,
@@ -232,8 +200,8 @@ def init_session_state():
         'excel_current_sheet': None,
         'excel_file_hash': None,
         'excel_header_row': None,  # None=auto-detect, 0=no header, N=specific row
-        'excel_start_row': 1,
-        'excel_end_row': None,
+        'excel_start_batch': 1,
+        'excel_end_batch': None,
         'excel_view_mode': 'extraction',  # extraction, review, export
         'excel_preview_cache': None,  # Cached preview DataFrame
         'excel_preview_cache_key': None,  # Cache key for invalidation
@@ -684,45 +652,6 @@ def render_product_preview(product, idx: int, page_num: int):
                         except Exception as e:
                             st.warning(f"Could not display image: {e}")
                         break  # Only show first image
-
-                # Remove Background Button
-                if st.button("✂️ Remove BG", key=f"rembg_{page_num}_{idx}"):
-                    if product.images and product.images[0].image_data:
-                        with st.spinner("Removing background..."):
-                            try:
-                                session = _load_rembg_session()
-                                if not session or isinstance(session, tuple):
-                                    msg = session[1] if isinstance(
-                                        session, tuple) else "rembg not available."
-                                    st.error(
-                                        f"✂️ Background removal unavailable: {msg}")
-                                    st.stop()
-                                from PIL import Image
-                                import io
-                                # Decode
-                                img_data = base64.b64decode(
-                                    product.images[0].image_data)
-                                input_img = Image.open(io.BytesIO(img_data))
-
-                                # Remove BG using pre-loaded session
-                                import warnings
-                                import rembg
-                                with warnings.catch_warnings():
-                                    warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(
-                                        input_img, session=session)
-
-                                # Process to properly handle transparency
-                                output_buffer = io.BytesIO()
-                                output_img.save(output_buffer, format='PNG')
-                                new_b64 = base64.b64encode(
-                                    output_buffer.getvalue()).decode('utf-8')
-
-                                # Update
-                                product.images[0].image_data = new_b64
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed to remove background: {e}")
 
                 # Image adjustment controls
                 with st.popover("🔧 Adjust Image"):
@@ -1347,9 +1276,6 @@ def render_export_view():
     with col_opt1:
         include_images_excel = st.checkbox(
             "Include images in Excel", value=True)
-        if include_images_excel:
-            remove_bg_all = st.checkbox("✂️ Remove backgrounds (Slow!)", value=False,
-                                        help="Automatically remove backgrounds from all images during export")
     with col_opt2:
         image_size = st.selectbox(
             "Image size",
@@ -1358,11 +1284,8 @@ def render_export_view():
             help="Small: 60px, Medium: 100px, Large: 150px"
         )
 
-    if not include_images_excel:
-        remove_bg_all = False
-
     if st.button("📊 Generate Excel File", width="stretch", type="primary"):
-        with st.spinner("Generating Excel file... (this may take a while if removing backgrounds)"):
+        with st.spinner("Generating Excel file..."):
             try:
                 excel_exporter = ExcelExporter()
                 excel_bytes = excel_exporter.export_products_to_excel(
@@ -1373,7 +1296,6 @@ def render_export_view():
                     include_images=include_images_excel,
                     image_size=image_size,
                     include_page_info=include_page_info,
-                    remove_bg=remove_bg_all
                 )
 
                 st.download_button(
@@ -2515,8 +2437,8 @@ def render_excel_sidebar_content():
                 st.session_state.excel_preview_cache = None
                 st.session_state.excel_preview_cache_key = None
                 st.session_state.excel_doc = None  # Force full re-processing
-                st.session_state.excel_start_row = None
-                st.session_state.excel_end_row = None
+                st.session_state.excel_start_batch = None
+                st.session_state.excel_end_batch = None
 
                 # Load the Excel file
                 with st.spinner("Loading Excel..."):
@@ -2533,7 +2455,7 @@ def render_excel_sidebar_content():
                             sheet = st.session_state.excel_doc.get_sheet(
                                 st.session_state.excel_current_sheet)
                             if sheet:
-                                st.session_state.excel_end_row = sheet.data_start_excel_row + sheet.total_rows - 1
+                                st.session_state.excel_end_batch = None  # will be clamped to total_batches on next render
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to load Excel: {e}")
@@ -2765,37 +2687,44 @@ def render_excel_extraction_view():
     st.divider()
 
     # Extraction controls
-    # Row range (uses Excel-absolute row numbers)
+    # Batch range — each batch covers rows_per_product consecutive data rows
     excel_first = sheet.data_start_excel_row
     excel_last = sheet.data_start_excel_row + sheet.total_rows - 1
-    if not st.session_state.excel_start_row or st.session_state.excel_start_row < excel_first or st.session_state.excel_start_row > excel_last:
-        st.session_state.excel_start_row = excel_first
-    if not st.session_state.excel_end_row or st.session_state.excel_end_row < excel_first or st.session_state.excel_end_row > excel_last:
-        st.session_state.excel_end_row = excel_last
+    _rpp_range = st.session_state.get('excel_rows_per_product', 1)
+    total_batches = max(1, math.ceil(sheet.total_rows / _rpp_range))
 
-    st.markdown("**⚙️ Row Range**")
+    if not st.session_state.excel_start_batch or st.session_state.excel_start_batch < 1 or st.session_state.excel_start_batch > total_batches:
+        st.session_state.excel_start_batch = 1
+    if not st.session_state.excel_end_batch or st.session_state.excel_end_batch < 1 or st.session_state.excel_end_batch > total_batches:
+        st.session_state.excel_end_batch = total_batches
+
+    st.markdown("**⚙️ Batch Range**")
+    st.caption(f"Total: {total_batches} batch(es) — {_rpp_range} row(s) per product")
     col_row1, col_row2 = st.columns(2)
     with col_row1:
-        new_start = st.number_input(
-            "From row",
-            min_value=excel_first,
-            max_value=excel_last,
-            value=st.session_state.excel_start_row,
-            key="_excel_start_row_widget"
+        new_start_batch = st.number_input(
+            "From batch",
+            min_value=1,
+            max_value=total_batches,
+            value=st.session_state.excel_start_batch,
+            key="_excel_start_batch_widget"
         )
-        st.session_state.excel_start_row = new_start
+        st.session_state.excel_start_batch = new_start_batch
     with col_row2:
-        new_end = st.number_input(
-            "To row",
-            min_value=excel_first,
-            max_value=excel_last,
-            value=st.session_state.excel_end_row,
-            key="_excel_end_row_widget"
+        new_end_batch = st.number_input(
+            "To batch",
+            min_value=1,
+            max_value=total_batches,
+            value=st.session_state.excel_end_batch,
+            key="_excel_end_batch_widget"
         )
-        st.session_state.excel_end_row = new_end
+        st.session_state.excel_end_batch = new_end_batch
 
-    start_row = st.session_state.excel_start_row
-    end_row = st.session_state.excel_end_row
+    # Convert selected batch range to Excel-absolute row numbers
+    start_batch = st.session_state.excel_start_batch
+    end_batch = st.session_state.excel_end_batch
+    start_row = excel_first + (start_batch - 1) * _rpp_range
+    end_row = min(excel_first + end_batch * _rpp_range - 1, excel_last)
 
     st.checkbox(
         "🖼️ Include Images",
@@ -2836,10 +2765,10 @@ def render_excel_extraction_view():
             'excel_llm_batch_size', 5), _max_products_btn)
         _rows_per_batch = _products_per_batch * _rpp_btn
         if st.button(
-            f"🧠 Extract rows {start_row}-{end_row} with LLM",
+            f"🧠 Extract batches {start_batch}-{end_batch} with LLM",
             type="primary",
             key="llm_extract_btn",
-            help=f"Send {end_row - start_row + 1} rows in batches of {_rows_per_batch} rows ({_products_per_batch} products) to the AI"
+            help=f"Send {end_batch - start_batch + 1} batch(es) ({end_row - start_row + 1} rows) in groups of {_products_per_batch} products to the AI"
         ):
             do_llm_excel_extraction(
                 sheet, start_row, end_row,
@@ -2898,37 +2827,6 @@ def render_excel_product_card(product: Product, idx: int):
                         st.image(image_data, caption="Product Image", width=150)
                     except Exception as e:
                         st.warning(f"Could not display image: {e}")
-
-                    # Remove Background Button
-                    if st.button("✂️ Remove BG", key=f"excel_rembg_{idx}"):
-                        with st.spinner("Removing background..."):
-                            try:
-                                session = _load_rembg_session()
-                                if not session or isinstance(session, tuple):
-                                    msg = session[1] if isinstance(
-                                        session, tuple) else "rembg not available."
-                                    st.error(
-                                        f"✂️ Background removal unavailable: {msg}")
-                                    st.stop()
-                                from PIL import Image
-                                import io
-
-                                img_data = base64.b64decode(
-                                    product.excel_image)
-                                input_img = Image.open(io.BytesIO(img_data))
-                                import warnings
-                                import rembg
-                                with warnings.catch_warnings():
-                                    warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(
-                                        input_img, session=session)
-                                output_buffer = io.BytesIO()
-                                output_img.save(output_buffer, format='PNG')
-                                product.excel_image = base64.b64encode(
-                                    output_buffer.getvalue()).decode('utf-8')
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed to remove background: {e}")
 
                     # Image adjustment controls
                     with st.popover("🔧 Adjust Image"):
@@ -3458,9 +3356,6 @@ def render_excel_export_view():
     include_images = st.checkbox("📷 Include product images", value=True, key="excel_export_images",
                                  help="Embed images in the exported Excel file (may increase file size)")
 
-    remove_bg_on_export = st.checkbox("✂️ Remove background from images", value=False, key="excel_export_remove_bg",
-                                      help="Automatically remove backgrounds from all images during export (slower)")
-
     # Filter products
     products_to_export = st.session_state.excel_products
     if include_reviewed_only:
@@ -3480,45 +3375,6 @@ def render_excel_export_view():
     if st.button("📊 Generate Excel File", type="primary", key="excel_generate_export"):
         with st.spinner("Generating Excel file..."):
             try:
-                # Remove backgrounds if requested
-                if remove_bg_on_export and include_images:
-                    products_with_images = [
-                        p for p in products_to_export if getattr(p, 'excel_image', None)]
-                    if products_with_images:
-                        progress_bar = st.progress(
-                            0, text="Removing backgrounds...")
-                        import warnings
-                        import os
-                        session = _load_rembg_session()
-                        if not session or isinstance(session, tuple):
-                            msg = session[1] if isinstance(
-                                session, tuple) else "rembg not available."
-                            st.error(
-                                f"✂️ Background removal unavailable: {msg}")
-                            st.stop()
-                        from PIL import Image
-                        import io
-                        import warnings
-                        import rembg
-
-                        for i, p in enumerate(products_with_images):
-                            try:
-                                img_data = base64.b64decode(p.excel_image)
-                                input_img = Image.open(io.BytesIO(img_data))
-                                with warnings.catch_warnings():
-                                    warnings.simplefilter("ignore")
-                                    output_img = rembg.remove(
-                                        input_img, session=session)
-                                output_buffer = io.BytesIO()
-                                output_img.save(output_buffer, format='PNG')
-                                p.excel_image = base64.b64encode(
-                                    output_buffer.getvalue()).decode('utf-8')
-                            except Exception:
-                                pass  # Skip failed images
-                            progress_bar.progress(
-                                (i + 1) / len(products_with_images), text=f"Removing backgrounds... {i+1}/{len(products_with_images)}")
-                        progress_bar.empty()
-
                 excel_exporter = ExcelExporter()
                 excel_bytes = excel_exporter.export_products_to_excel(
                     products=products_to_export,
