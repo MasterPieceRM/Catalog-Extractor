@@ -32,8 +32,10 @@ for dir_path in [DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR]:
 # API Configuration
 API_KEY = _get_secret("API_KEY")
 LLM_MODEL = _get_secret("LLM_MODEL", "openai/gpt-4o-mini")
+LLM_EXCEL_MODEL = _get_secret("LLM_EXCEL_MODEL", LLM_MODEL)
 LLM_BASE_URL = _get_secret("LLM_BASE_URL", "https://openrouter.ai/api/v1")
-LLM_VISION_ENABLED = _get_secret("LLM_VISION_ENABLED", "false").lower() == "true"
+LLM_VISION_ENABLED = _get_secret(
+    "LLM_VISION_ENABLED", "false").lower() == "true"
 
 # OCR Configuration
 # Options: tesseract, easyocr, paddleocr

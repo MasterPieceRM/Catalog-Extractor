@@ -8,7 +8,7 @@ from src.pdf_processor import PDFProcessor, PDFDocument
 from src.image_extractor import ImageExtractor, get_image_extraction_prompt_addition
 from src.excel_exporter import ExcelExporter
 from src.excel_processor import ExcelProcessor, ExcelDocument
-from src.config import UPLOAD_DIR, OUTPUT_DIR, PAGE_TITLE, LLM_VISION_ENABLED
+from src.config import UPLOAD_DIR, OUTPUT_DIR, PAGE_TITLE, LLM_VISION_ENABLED, LLM_EXCEL_MODEL
 import sys
 import streamlit as st
 import json
@@ -210,6 +210,8 @@ def init_session_state():
         'excel_rows_per_product': 1,  # How many rows span a single product
         # Description of what each row contains
         'excel_row_descriptions': [''],
+        # Field to auto-merge on after extraction (None = disabled)
+        'excel_auto_merge_field': None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1194,6 +1196,183 @@ def render_product_review_card(product: Product, idx: int):
                 st.rerun()
 
 
+def merge_products_by_field(products, merge_field: str):
+    """
+    Merge products that share the same value for merge_field.
+
+    Merge rules per field type:
+    - size_pivot / dict in raw_attributes: union of all dicts (later values overwrite earlier ones)
+    - list fields (features, source_blocks, source_rows, images): concatenate and deduplicate
+    - excel_image: keep first non-None
+    - primitive fields: keep first non-empty value
+    - needs_review: True if ANY merged product has it True
+    """
+    import copy
+
+    if not products or not merge_field:
+        return products
+
+    # Group products by the merge key value
+    groups: dict = {}
+    order: list = []  # Preserve first-seen order
+
+    for product in products:
+        if hasattr(product, merge_field):
+            key_val = getattr(product, merge_field)
+        else:
+            key_val = product.raw_attributes.get(merge_field)
+
+        # Normalise: strip, lowercase for comparison, keep original for display
+        norm_key = str(key_val).strip().lower() if key_val else ''
+        if not norm_key:
+            # No key value — keep as standalone
+            norm_key = f'__no_key_{id(product)}'
+
+        if norm_key not in groups:
+            groups[norm_key] = []
+            order.append(norm_key)
+        groups[norm_key].append(product)
+
+    merged = []
+    for norm_key in order:
+        group = groups[norm_key]
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+
+        # Deep-copy the first product as the base
+        base = copy.deepcopy(group[0])
+
+        for other in group[1:]:
+            # --- Direct model fields ---
+            for attr in type(base).model_fields:
+                if attr.startswith('_'):
+                    continue
+                base_val = getattr(base, attr)
+                other_val = getattr(other, attr)
+
+                if attr == 'needs_review':
+                    setattr(base, attr, base_val or other_val)
+
+                elif attr == 'images':
+                    # Combine image lists (deduplicate by image_id)
+                    existing_ids = {img.image_id for img in base_val}
+                    for img in other_val:
+                        if img.image_id not in existing_ids:
+                            base_val.append(img)
+                            existing_ids.add(img.image_id)
+
+                elif attr == 'source_rows':
+                    combined = list(dict.fromkeys(base_val + other_val))
+                    setattr(base, attr, combined)
+
+                elif attr == 'source_blocks':
+                    combined = list(dict.fromkeys(base_val + other_val))
+                    setattr(base, attr, combined)
+
+                elif attr == 'features':
+                    combined = list(dict.fromkeys(base_val + other_val))
+                    setattr(base, attr, combined)
+
+                elif attr == 'specifications':
+                    # dict: other fills in missing keys
+                    for k, v in other_val.items():
+                        if k not in base_val:
+                            base_val[k] = v
+
+                elif attr == 'excel_image':
+                    if not base_val and other_val:
+                        setattr(base, attr, other_val)
+
+                elif attr == 'raw_text':
+                    pass  # keep base
+
+                elif attr == 'extraction_confidence':
+                    # Keep maximum confidence
+                    if other_val and other_val > (base_val or 0):
+                        setattr(base, attr, other_val)
+
+                else:
+                    # Primitive: fill in from other if base is empty/None
+                    if (base_val is None or base_val == '' or base_val == 0) and other_val:
+                        setattr(base, attr, other_val)
+
+            # --- raw_attributes ---
+            for k, v in other.raw_attributes.items():
+                if k not in base.raw_attributes:
+                    base.raw_attributes[k] = v
+                else:
+                    base_v = base.raw_attributes[k]
+                    # size_pivot / dict: union
+                    if isinstance(base_v, dict) and isinstance(v, dict):
+                        merged_dict = {**v, **base_v}  # base wins on conflict
+                        base.raw_attributes[k] = merged_dict
+                    elif isinstance(base_v, str) and isinstance(v, str):
+                        # Try JSON-dict merge
+                        import json as _json
+                        try:
+                            bd = _json.loads(base_v)
+                            od = _json.loads(v)
+                            if isinstance(bd, dict) and isinstance(od, dict):
+                                base.raw_attributes[k] = {**od, **bd}
+                                continue
+                        except Exception:
+                            pass
+                        # Plain string: keep base if non-empty
+                        if not base_v and v:
+                            base.raw_attributes[k] = v
+                    elif isinstance(base_v, list) and isinstance(v, list):
+                        combined = list(dict.fromkeys(base_v + v))
+                        base.raw_attributes[k] = combined
+                    elif (base_v is None or base_v == '') and v:
+                        base.raw_attributes[k] = v
+
+        merged.append(base)
+
+    return merged
+
+
+def _sort_size_keys(keys):
+    """
+    Sort size keys for column ordering:
+      1. Numeric sizes (int/float: shoe sizes, EU sizes, etc.) — ascending by value
+      2. Standard clothing label sizes — by canonical garment order
+      3. Everything else — alphabetically
+
+    Examples:
+      ["XL", "9.5", "S", "10", "M", "8", "TU", "XXL"]
+      → ["8", "9.5", "10", "S", "M", "XL", "XXL", "TU"]
+    """
+    # Canonical clothing size order (covers most common labels)
+    CLOTHING_ORDER = [
+        "XXXS", "XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL",
+        "3XL", "4XL", "5XL",
+        "XS/S", "S/M", "M/L", "L/XL", "XL/XXL",
+        "UNIQUE", "TU", "ONE SIZE", "ONESIZE", "OS",
+    ]
+    clothing_rank = {v.upper(): i for i, v in enumerate(CLOTHING_ORDER)}
+
+    numeric = []
+    clothing = []
+    other = []
+
+    for k in keys:
+        upper = k.strip().upper()
+        try:
+            numeric.append((float(k.replace(',', '.')), k))
+        except (ValueError, AttributeError):
+            if upper in clothing_rank:
+                clothing.append((clothing_rank[upper], k))
+            else:
+                other.append(k)
+
+    numeric.sort(key=lambda x: x[0])
+    clothing.sort(key=lambda x: x[0])
+    other.sort()
+
+    return [k for _, k in numeric] + [k for _, k in clothing] + other
+
+
 def expand_pivot_fields(schema_fields, products):
     """
     For each field with type='size_pivot', scan all products to collect unique keys,
@@ -1235,7 +1414,7 @@ def expand_pivot_fields(schema_fields, products):
                 'display_name': f'{parent_name} (no sizes found)',
             })
         else:
-            for key in all_keys:
+            for key in _sort_size_keys(all_keys):
                 expanded.append({
                     'name': f'__pivot__{parent_name}__{key}',
                     'display_name': key,
@@ -2836,7 +3015,7 @@ def render_excel_extraction_view():
             "Configure hints in **Schema** settings.")
 
     # LLM options
-    with st.expander("⚙️ LLM Options", expanded=False):
+    with st.expander("⚙️ LLM Options", expanded=True):
         _rpp = st.session_state.get('excel_rows_per_product', 1)
         _max_products = max(1, 50 // _rpp)
         _default_products = min(5, _max_products)
@@ -2854,6 +3033,27 @@ def render_excel_extraction_view():
             on_change=lambda: setattr(
                 st.session_state, 'excel_llm_batch_size', st.session_state._llm_batch_size_widget)
         )
+
+        st.divider()
+        st.markdown("**🔀 Auto-merge after extraction**")
+        st.caption(
+            "After each extraction, automatically merge products that share the same value for this field. Leave blank to disable.")
+        _schema_fields_merge = st.session_state.get(
+            'schema_fields', DEFAULT_SCHEMA_FIELDS)
+        _merge_options = [None] + [f['name'] for f in _schema_fields_merge]
+        _current_merge = st.session_state.get('excel_auto_merge_field', None)
+        _merge_idx = _merge_options.index(
+            _current_merge) if _current_merge in _merge_options else 0
+        _selected_merge = st.selectbox(
+            "Merge by field",
+            _merge_options,
+            index=_merge_idx,
+            format_func=lambda x: "(disabled)" if x is None else x,
+            key="_excel_auto_merge_field_widget",
+            label_visibility="collapsed",
+        )
+        if _selected_merge != st.session_state.get('excel_auto_merge_field'):
+            st.session_state.excel_auto_merge_field = _selected_merge
 
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -3158,7 +3358,7 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
     # Clear existing products
     st.session_state.excel_products = []
 
-    extractor = LLMExtractor()
+    extractor = LLMExtractor(model=LLM_EXCEL_MODEL)
     schema_fields = st.session_state.get(
         'schema_fields', DEFAULT_SCHEMA_FIELDS)
     rows_per_product = st.session_state.get('excel_rows_per_product', 1)
@@ -3342,8 +3542,21 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
 
         progress_bar.progress(
             1.0, text=f"✅ Done: {total_products} products extracted!")
-        status.update(
-            label=f"✅ Extracted {total_products} products from {total_rows} rows", state="complete")
+
+        # Auto-merge if configured
+        auto_merge_field = st.session_state.get('excel_auto_merge_field')
+        if auto_merge_field:
+            before_merge = len(st.session_state.excel_products)
+            st.session_state.excel_products = merge_products_by_field(
+                st.session_state.excel_products, auto_merge_field)
+            after_merge = len(st.session_state.excel_products)
+            merged_count = before_merge - after_merge
+            label_text = (
+                f"✅ Extracted {total_products} products → merged {merged_count} duplicate(s) by '{auto_merge_field}' → {after_merge} remaining")
+        else:
+            label_text = f"✅ Extracted {total_products} products from {total_rows} rows"
+
+        status.update(label=label_text, state="complete")
 
     st.rerun()
 
