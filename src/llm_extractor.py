@@ -529,11 +529,28 @@ Return ONLY this JSON structure:
         # Parse price
         price = None
         if raw.get("price"):
-            price_data = raw["price"] if isinstance(raw["price"], dict) else {
-                "amount": raw["price"]}
+            if isinstance(raw["price"], dict):
+                price_data = raw["price"]
+                currency_str = price_data.get("currency", "UNKNOWN")
+            else:
+                # Plain string like "15.99 Eur" or "EUR 15.99"
+                price_str = str(raw["price"]).upper()
+                currency_str = "UNKNOWN"
+                for cur in ("EUR", "USD", "GBP", "CHF"):
+                    if cur in price_str or cur[:2] in price_str:
+                        currency_str = cur
+                        break
+                price_data = {"amount": raw["price"],
+                              "original_text": str(raw["price"])}
+
+            try:
+                currency = Currency(currency_str)
+            except ValueError:
+                currency = Currency.UNKNOWN
+
             price = Price(
                 amount=price_data.get("amount"),
-                currency=Currency(price_data.get("currency", "UNKNOWN")),
+                currency=currency,
                 original_text=str(price_data.get("original_text", ""))
             )
 

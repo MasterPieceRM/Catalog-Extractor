@@ -2,6 +2,7 @@
 Product Schema Definitions
 Pydantic models for structured product data extraction
 """
+import re
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any, Union
 from enum import Enum
@@ -50,13 +51,14 @@ class Price(BaseModel):
     @classmethod
     def parse_amount(cls, v):
         if isinstance(v, str):
-            # Remove currency symbols and parse
-            cleaned = v.replace('€', '').replace('$', '').replace('£', '')
-            cleaned = cleaned.replace(',', '.').strip()
-            try:
-                return float(cleaned)
-            except ValueError:
-                return None
+            # Extract the first numeric value from the string (handles "15.99 Eur", "EUR 15.99", "$15.99", etc.)
+            match = re.search(r'\d[\d\s]*[,.]?[\d]*', v.replace(',', '.'))
+            if match:
+                try:
+                    return float(match.group().replace(' ', ''))
+                except ValueError:
+                    return None
+            return None
         return v
 
 
@@ -92,9 +94,11 @@ class ProductImage(BaseModel):
     """Reference to product image in the catalog"""
     image_id: str = ""
     page_num: int = 0
-    bbox: List[float] = Field(default_factory=list)  # Bounding box [x1, y1, x2, y2]
+    # Bounding box [x1, y1, x2, y2]
+    bbox: List[float] = Field(default_factory=list)
     description: str = ""
-    image_data: Optional[str] = Field(None, description="Base64-encoded image data")
+    image_data: Optional[str] = Field(
+        None, description="Base64-encoded image data")
 
 
 class Product(BaseModel):
