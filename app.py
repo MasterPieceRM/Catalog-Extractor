@@ -1194,6 +1194,56 @@ def render_product_review_card(product: Product, idx: int):
                 st.rerun()
 
 
+def expand_pivot_fields(schema_fields, products):
+    """
+    For each field with type='size_pivot', scan all products to collect unique keys,
+    then replace that field with one synthetic field per key.
+
+    Returns a new list of schema fields with pivot fields expanded.
+    Synthetic field names use the convention: __pivot__{parent}__{key}
+    """
+    expanded = []
+    for field in schema_fields:
+        if field.get('type') != 'size_pivot':
+            expanded.append(field)
+            continue
+
+        parent_name = field['name']
+        # Collect all keys across products
+        all_keys = []
+        seen = set()
+        for product in products:
+            val = product.raw_attributes.get(parent_name)
+            # Guard: LLM may return the dict serialised as a JSON string
+            if isinstance(val, str):
+                try:
+                    import json as _json
+                    val = _json.loads(val)
+                except Exception:
+                    val = {}
+            if isinstance(val, dict):
+                for k in val.keys():
+                    if k not in seen:
+                        all_keys.append(k)
+                        seen.add(k)
+
+        if not all_keys:
+            # No data yet — keep as placeholder column so header still shows
+            expanded.append({
+                **field,
+                'name': f'__pivot__{parent_name}__',
+                'display_name': f'{parent_name} (no sizes found)',
+            })
+        else:
+            for key in all_keys:
+                expanded.append({
+                    'name': f'__pivot__{parent_name}__{key}',
+                    'display_name': key,
+                    'type': 'text',
+                })
+    return expanded
+
+
 def render_export_view():
     """Render the export view - CSV only with schema fields"""
     st.subheader("📤 Export Products")
@@ -1288,9 +1338,11 @@ def render_export_view():
         with st.spinner("Generating Excel file..."):
             try:
                 excel_exporter = ExcelExporter()
+                export_schema = expand_pivot_fields(
+                    schema_fields, products_to_export)
                 excel_bytes = excel_exporter.export_products_to_excel(
                     products=products_to_export,
-                    schema_fields=schema_fields,
+                    schema_fields=export_schema,
                     computed_fields=st.session_state.get(
                         'computed_fields', []),
                     include_images=include_images_excel,
@@ -1318,12 +1370,22 @@ def render_export_view():
 
         products_to_show = st.session_state.products[:10]  # Show first 10
         preview_rows = []
+        preview_schema = expand_pivot_fields(
+            schema_fields, st.session_state.products)
 
         for p in products_to_show:
             row = {}
-            for field in schema_fields:
+            for field in preview_schema:
                 field_name = field['name']
-                if hasattr(p, field_name):
+                col_label = field.get('display_name', field_name)
+                if field_name.startswith('__pivot__'):
+                    parts = field_name[len('__pivot__'):].split('__', 1)
+                    parent_name = parts[0]
+                    size_key = parts[1] if len(parts) > 1 else ''
+                    parent_val = p.raw_attributes.get(parent_name)
+                    value = parent_val.get(size_key, '') if isinstance(
+                        parent_val, dict) else ''
+                elif hasattr(p, field_name):
                     value = getattr(p, field_name)
                 else:
                     value = p.raw_attributes.get(field_name, '')
@@ -1332,7 +1394,7 @@ def render_export_view():
                     if hasattr(value, 'amount'):
                         value = value.amount
 
-                row[field_name] = value
+                row[col_label] = value
 
             # Computed fields
             computed_fields = st.session_state.get('computed_fields', [])
@@ -1974,19 +2036,21 @@ def render_schema_config():
 
     for idx, field in enumerate(st.session_state.schema_fields):
         field_name = field['name']
+        is_pivot = field.get('type') == 'size_pivot'
 
         with st.container():
             # Field header row
             col1, col2 = st.columns([5, 0.5])
 
             with col1:
+                label = f"Name{' 📐 size pivot' if is_pivot else ''}"
                 st.text_input(
-                    "Name",
+                    label,
                     value=field_name,
                     key=f"edit_name_{field_name}",
                     on_change=update_schema_field,
                     args=(field_name, idx),
-                    label_visibility="collapsed",
+                    label_visibility="collapsed" if not is_pivot else "visible",
                     placeholder="Field name"
                 )
             with col2:
@@ -2110,22 +2174,42 @@ def render_schema_config():
     new_field_name = st.text_input(
         "Field Name", key="new_field_name", placeholder="e.g., size, color, weight")
 
-    if st.button("➕ Add Field", width="stretch"):
-        if new_field_name:
+    add_col1, add_col2 = st.columns(2)
+    with add_col1:
+        if st.button("➕ Add Field", width="stretch"):
+            if new_field_name:
+                existing_names = [f['name']
+                                  for f in st.session_state.schema_fields]
+                if new_field_name.lower() in [n.lower() for n in existing_names]:
+                    st.error("Field already exists!")
+                else:
+                    st.session_state.schema_fields.append({
+                        "name": new_field_name.lower().replace(" ", "_"),
+                        "type": "text",
+                        "hint": "",
+                    })
+                    st.success(f"Added field: {new_field_name}")
+                    st.rerun()
+            else:
+                st.warning("Enter a field name")
+    with add_col2:
+        if st.button("📐 Add Size Pivot Field", width="stretch",
+                     help="Adds a special field where each size becomes its own column at export. Add a hint to tell the AI what VALUE to put per size (e.g. 'the stock quantity for that size'). The AI extracts sizes as a dict e.g. {\"S\": \"5\", \"M\": \"3\", \"TU\": \"8\"}."):
+            pivot_name = new_field_name.lower().replace(
+                " ", "_") if new_field_name else "sizes"
             existing_names = [f['name']
                               for f in st.session_state.schema_fields]
-            if new_field_name.lower() in [n.lower() for n in existing_names]:
-                st.error("Field already exists!")
+            if pivot_name in existing_names:
+                st.error(f"Field '{pivot_name}' already exists!")
             else:
                 st.session_state.schema_fields.append({
-                    "name": new_field_name.lower().replace(" ", "_"),
-                    "type": "text",
+                    "name": pivot_name,
+                    "type": "size_pivot",
                     "hint": "",
                 })
-                st.success(f"Added field: {new_field_name}")
+                st.success(
+                    f"Added size pivot field: '{pivot_name}' — each unique size will become its own column at export")
                 st.rerun()
-        else:
-            st.warning("Enter a field name")
 
     st.divider()
 
@@ -2203,9 +2287,15 @@ def get_schema_prompt():
         try:
             field_name = field.get('name', 'unknown')
             hint = field.get('hint', '')
+            field_type = field.get('type', 'text')
 
             field_line = f"  • {field_name}"
-            if hint:
+            if field_type == 'size_pivot':
+                if hint:
+                    field_line += f" (extract as a JSON object: each key = size name, each value = {hint}, e.g. {{\"S\": \"5\", \"M\": \"3\", \"TU\": \"8\", \"XL\": \"\"}})"
+                else:
+                    field_line += " (extract as a JSON object: each key = size name, each value = the extracted quantity or value for that size, e.g. {\"S\": \"5\", \"M\": \"3\", \"XL\": \"\"})"
+            elif hint:
                 field_line += f"\n      → EXTRACTION HINT: {hint}"
             field_lines.append(field_line)
         except Exception:
@@ -2281,9 +2371,15 @@ def get_excel_schema_prompt():
         try:
             field_name = field.get('name', 'unknown')
             hint = field.get('hint', '')
+            field_type = field.get('type', 'text')
 
             field_line = f"  • {field_name}"
-            if hint:
+            if field_type == 'size_pivot':
+                if hint:
+                    field_line += f" (extract as a JSON object: each key = size name, each value = {hint}, e.g. {{\"S\": \"5\", \"M\": \"3\", \"TU\": \"8\", \"XL\": \"\"}})"
+                else:
+                    field_line += " (extract as a JSON object: each key = size name, each value = the extracted quantity or value for that size, e.g. {\"S\": \"5\", \"M\": \"3\", \"XL\": \"\"})"
+            elif hint:
                 field_line += f"\n      → EXTRACTION HINT: {hint}"
             field_lines.append(field_line)
         except Exception:
@@ -2455,7 +2551,8 @@ def render_excel_sidebar_content():
                             sheet = st.session_state.excel_doc.get_sheet(
                                 st.session_state.excel_current_sheet)
                             if sheet:
-                                st.session_state.excel_end_batch = None  # will be clamped to total_batches on next render
+                                # will be clamped to total_batches on next render
+                                st.session_state.excel_end_batch = None
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to load Excel: {e}")
@@ -2699,7 +2796,8 @@ def render_excel_extraction_view():
         st.session_state.excel_end_batch = total_batches
 
     st.markdown("**⚙️ Batch Range**")
-    st.caption(f"Total: {total_batches} batch(es) — {_rpp_range} row(s) per product")
+    st.caption(
+        f"Total: {total_batches} batch(es) — {_rpp_range} row(s) per product")
     col_row1, col_row2 = st.columns(2)
     with col_row1:
         new_start_batch = st.number_input(
@@ -3376,9 +3474,11 @@ def render_excel_export_view():
         with st.spinner("Generating Excel file..."):
             try:
                 excel_exporter = ExcelExporter()
+                export_schema = expand_pivot_fields(
+                    schema_fields, products_to_export)
                 excel_bytes = excel_exporter.export_products_to_excel(
                     products=products_to_export,
-                    schema_fields=schema_fields,
+                    schema_fields=export_schema,
                     computed_fields=st.session_state.get(
                         'computed_fields', []),
                     include_images=include_images,
@@ -3404,11 +3504,26 @@ def render_excel_export_view():
         import pandas as pd
 
         preview_rows = []
+        preview_schema = expand_pivot_fields(schema_fields, products_to_export)
         for p in products_to_export[:10]:
             row = {}
-            for field in schema_fields:
+            for field in preview_schema:
                 field_name = field['name']
-                if hasattr(p, field_name):
+                col_label = field.get('display_name', field_name)
+                if field_name.startswith('__pivot__'):
+                    parts = field_name[len('__pivot__'):].split('__', 1)
+                    parent_name = parts[0]
+                    size_key = parts[1] if len(parts) > 1 else ''
+                    parent_val = p.raw_attributes.get(parent_name)
+                    if isinstance(parent_val, str):
+                        import json as _json
+                        try:
+                            parent_val = _json.loads(parent_val)
+                        except Exception:
+                            parent_val = {}
+                    value = parent_val.get(size_key, '') if isinstance(
+                        parent_val, dict) else ''
+                elif hasattr(p, field_name):
                     value = getattr(p, field_name)
                 else:
                     value = p.raw_attributes.get(field_name, '')
@@ -3417,7 +3532,7 @@ def render_excel_export_view():
                     if hasattr(value, 'amount'):
                         value = value.amount
 
-                row[field_name] = value
+                row[col_label] = value
 
             # Computed fields
             computed_fields = st.session_state.get('computed_fields', [])

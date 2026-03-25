@@ -149,7 +149,8 @@ class ExcelSheet:
     headers: List[str]
     rows: List[List[Any]]
     total_rows: int
-    data_start_excel_row: int = 2  # 1-based Excel row where data starts (after headers)
+    # 1-based Excel row where data starts (after headers)
+    data_start_excel_row: int = 2
     image_metas: List[ExcelImageMeta] = field(
         default_factory=list)  # Lightweight metadata only
     images: List[ExcelImage] = field(
@@ -279,7 +280,8 @@ class ExcelProcessor:
 
             for sheet_name in wb.sheetnames:
                 ws = wb[sheet_name]
-                sheet = self._process_sheet(ws, sheet_name, header_row=header_row)
+                sheet = self._process_sheet(
+                    ws, sheet_name, header_row=header_row)
                 doc.sheets[sheet_name] = sheet
                 logger.info(
                     f"Loaded sheet '{sheet_name}': {sheet.total_rows} rows, {len(sheet.headers)} columns")
@@ -315,10 +317,12 @@ class ExcelProcessor:
         try:
             if is_xls:
                 # Use xlrd for .xls files (Excel 97-2003 format)
-                doc = self._load_xls_from_bytes(file_bytes, file_name, header_row=header_row)
+                doc = self._load_xls_from_bytes(
+                    file_bytes, file_name, header_row=header_row)
             else:
                 # Use openpyxl for .xlsx files
-                doc = self._load_xlsx_from_bytes(file_bytes, file_name, header_row=header_row)
+                doc = self._load_xlsx_from_bytes(
+                    file_bytes, file_name, header_row=header_row)
 
         except Exception as e:
             # If openpyxl fails, try xlrd as fallback
@@ -326,7 +330,8 @@ class ExcelProcessor:
                 logger.warning(
                     f"openpyxl failed, trying xlrd for: {file_name}")
                 try:
-                    doc = self._load_xls_from_bytes(file_bytes, file_name, header_row=header_row)
+                    doc = self._load_xls_from_bytes(
+                        file_bytes, file_name, header_row=header_row)
                 except Exception as e2:
                     logger.error(f"Both openpyxl and xlrd failed: {e2}")
                     raise ValueError(
@@ -434,7 +439,8 @@ class ExcelProcessor:
 
         for sheet_name in wb.sheet_names():
             ws = wb.sheet_by_name(sheet_name)
-            sheet = self._process_xls_sheet(ws, sheet_name, header_row=header_row)
+            sheet = self._process_xls_sheet(
+                ws, sheet_name, header_row=header_row)
             doc.sheets[sheet_name] = sheet
             logger.info(
                 f"Loaded sheet '{sheet_name}': {sheet.total_rows} rows, {len(sheet.headers)} columns")
@@ -468,13 +474,14 @@ class ExcelProcessor:
             if hr_idx < ws.nrows:
                 row_values = [self._clean_cell_value(ws.cell_value(hr_idx, col_idx))
                               for col_idx in range(num_cols)]
-                headers = [str(v) if v else f"Column_{i+1}" for i, v in enumerate(row_values)]
+                headers = [
+                    str(v) if v else f"Column_{i+1}" for i, v in enumerate(row_values)]
             else:
                 headers = [f"Column_{i+1}" for i in range(num_cols)]
-            # Keep ALL data rows (including empty) except the header row
+            # Keep only rows AFTER the header row — skip header and all pre-header rows
             for row_idx in range(ws.nrows):
-                if row_idx == hr_idx:
-                    continue  # Skip the header row
+                if row_idx <= hr_idx:
+                    continue  # Skip header and all rows before it
                 row_values = [self._clean_cell_value(ws.cell_value(row_idx, col_idx))
                               for col_idx in range(num_cols)]
                 rows.append(row_values)
@@ -492,10 +499,12 @@ class ExcelProcessor:
                         continue
                     # Check for gaps between first and last column with data
                     # (trailing empty columns are OK — they're just extra columns)
-                    last_data_col = max((i for i, v in enumerate(row_values) if v != '' and v is not None), default=-1)
+                    last_data_col = max((i for i, v in enumerate(
+                        row_values) if v != '' and v is not None), default=-1)
                     if last_data_col >= 0:
                         core_values = row_values[:last_data_col + 1]
-                        has_gap = any(v == '' or v is None for v in core_values)
+                        has_gap = any(
+                            v == '' or v is None for v in core_values)
                     else:
                         has_gap = True
                     if has_gap:
@@ -554,15 +563,17 @@ class ExcelProcessor:
             # Specific header row (1-based, so index = header_row - 1)
             hr_idx = header_row - 1
             if hr_idx < len(all_rows):
-                header_values = [self._clean_cell_value(cell) for cell in all_rows[hr_idx]]
-                headers = [str(v) if v else f"Column_{i+1}" for i, v in enumerate(header_values)]
+                header_values = [self._clean_cell_value(
+                    cell) for cell in all_rows[hr_idx]]
+                headers = [
+                    str(v) if v else f"Column_{i+1}" for i, v in enumerate(header_values)]
             else:
                 if num_cols == 0 and all_rows:
                     num_cols = len(all_rows[0])
                 headers = [f"Column_{i+1}" for i in range(num_cols)]
-            # Keep ALL data rows (including empty) except header row
+            # Keep only rows AFTER the header row — skip header and all pre-header rows
             for row_idx, row in enumerate(all_rows):
-                if row_idx == hr_idx:
+                if row_idx <= hr_idx:
                     continue
                 rows.append([self._clean_cell_value(cell) for cell in row])
             header_excel_row = hr_idx
@@ -580,15 +591,18 @@ class ExcelProcessor:
                     row_values = [self._clean_cell_value(cell) for cell in row]
                     # Check for gaps between first and last column with data
                     # (trailing empty columns are OK — they're just extra columns)
-                    last_data_col = max((i for i, v in enumerate(row_values) if v != '' and v is not None), default=-1)
+                    last_data_col = max((i for i, v in enumerate(
+                        row_values) if v != '' and v is not None), default=-1)
                     if last_data_col >= 0:
                         core_values = row_values[:last_data_col + 1]
-                        has_gap = any(v == '' or v is None for v in core_values)
+                        has_gap = any(
+                            v == '' or v is None for v in core_values)
                     else:
                         has_gap = True
                     if has_gap:
                         # Fall back to no-header mode
-                        headers = [f"Column_{i+1}" for i in range(num_cols or len(row))]
+                        headers = [
+                            f"Column_{i+1}" for i in range(num_cols or len(row))]
                         header_found = True
                         no_header_fallback = True
                         rows.append(row_values)  # Keep this row as data

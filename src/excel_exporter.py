@@ -51,7 +51,7 @@ class ExcelExporter:
     ) -> bytes:
         """
         Export products to Excel with optional embedded images.
-        
+
         Args:
             computed_fields: List of dicts with 'name' and 'formula' keys.
                              Example: [{'name': 'total', 'formula': '{price}*2'}]
@@ -70,7 +70,8 @@ class ExcelExporter:
             headers.append("Image")
 
         for field in schema_fields:
-            headers.append(field['name'].replace('_', ' ').title())
+            display = field.get('display_name') or field['name']
+            headers.append(display.replace('_', ' ').title())
 
         # Computed fields headers
         if computed_fields:
@@ -189,12 +190,12 @@ class ExcelExporter:
             # Build field_name -> column_letter mapping for ALL fields (schema + computed)
             field_col_map = {}
             col_offset = 2 if include_images else 1
-            
+
             # Map schema fields
             for field_idx, field in enumerate(schema_fields):
                 col_num = col_offset + field_idx
                 field_col_map[field['name']] = get_column_letter(col_num)
-            
+
             # Map computed fields (they come after schema fields)
             computed_start_col = col_offset + len(schema_fields)
             for idx, field in enumerate(computed_fields):
@@ -209,14 +210,14 @@ class ExcelExporter:
             for field in computed_fields:
                 name = field['name']
                 formula_template = field['formula']
-                
+
                 if not formula_template:
                     continue
 
                 target_col = field_col_map.get(name)
                 if not target_col:
                     continue
-                    
+
                 target_col_num = column_index_from_string(target_col)
 
                 for row_num in range(data_start_row, data_end_row + 1):
@@ -226,10 +227,11 @@ class ExcelExporter:
                         # Use word boundary check if needed, but simple replace usually works for field names
                         # Better: sort by length desc to avoid prefix matching issues
                         pass
-                    
+
                     # Sort keys by length descending to avoid partial replacements (e.g. {price} vs {price_total})
-                    sorted_refs = sorted(field_col_map.items(), key=lambda x: len(x[0]), reverse=True)
-                    
+                    sorted_refs = sorted(field_col_map.items(
+                    ), key=lambda x: len(x[0]), reverse=True)
+
                     for ref_name, ref_col in sorted_refs:
                         excel_formula = excel_formula.replace(
                             '{' + ref_name + '}', f'{ref_col}{row_num}')
@@ -245,7 +247,7 @@ class ExcelExporter:
             formula_header_fill = PatternFill(
                 start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
             formula_header_font = Font(bold=True, color="000000", size=11)
-            
+
             for field in computed_fields:
                 name = field['name']
                 if name in field_col_map:
@@ -290,6 +292,26 @@ class ExcelExporter:
 
     def _get_field_value(self, product, field_name: str) -> Any:
         """Get a field value from a product"""
+        # Handle pivot fields: __pivot__{parent}__{key}
+        if field_name.startswith('__pivot__'):
+            # field_name e.g. "__pivot__sizes__XL"
+            parts = field_name[len('__pivot__'):].split('__', 1)
+            parent_name = parts[0]
+            size_key = parts[1] if len(parts) > 1 else ''
+            parent_val = product.raw_attributes.get(parent_name)
+            # Guard: LLM may return the dict serialised as a JSON string
+            if isinstance(parent_val, str):
+                import json as _json
+                try:
+                    parent_val = _json.loads(parent_val)
+                except Exception:
+                    parent_val = {}
+            if isinstance(parent_val, dict):
+                value = parent_val.get(size_key, '')
+            else:
+                value = ''
+            return value if value is not None else ''
+
         # Check direct attributes first
         if hasattr(product, field_name):
             value = getattr(product, field_name)

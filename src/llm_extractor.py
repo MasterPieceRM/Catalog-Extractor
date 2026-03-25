@@ -252,9 +252,15 @@ class LLMExtractor:
             for field in schema_fields:
                 field_name = field.get('name', 'unknown')
                 hint = field.get('hint', '')
+                field_type = field.get('type', 'text')
 
                 field_line = f"  • {field_name}"
-                if hint:
+                if field_type == 'size_pivot':
+                    if hint:
+                        field_line += f" (extract as a JSON object: each key = size name, each value = {hint}, e.g. {{\"S\": \"5\", \"M\": \"3\", \"TU\": \"8\", \"XL\": \"\"}})"
+                    else:
+                        field_line += " (extract as a JSON object: each key = size name, each value = the extracted quantity or value for that size, e.g. {\"S\": \"5\", \"M\": \"3\", \"XL\": \"\"})"
+                elif hint:
                     field_line += f"\n      → EXTRACTION HINT: {hint}"
                 field_lines.append(field_line)
 
