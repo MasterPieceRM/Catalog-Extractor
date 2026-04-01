@@ -561,11 +561,6 @@ def render_extraction_view():
                                 st.text(
                                     f"Page {page_idx + 1}: {products_extracted} products")
 
-                            # Rate limit delay (30 req/min = 2 sec between requests)
-                            if i < len(pages_list) - 1:  # Don't delay after last page
-                                import time
-                                time.sleep(2)
-
                         # Final progress
                         progress_bar.progress(1.0)
 
@@ -2980,11 +2975,14 @@ def render_excel_extraction_view():
     st.divider()
 
     # Extraction controls
-    # Batch range — each batch covers rows_per_product consecutive data rows
+    # Batch range — each batch = one LLM call = products_per_batch * rows_per_product rows
     excel_first = sheet.data_start_excel_row
     excel_last = sheet.data_start_excel_row + sheet.total_rows - 1
     _rpp_range = st.session_state.get('excel_rows_per_product', 1)
-    total_batches = max(1, math.ceil(sheet.total_rows / _rpp_range))
+    _products_per_batch_range = max(
+        1, st.session_state.get('excel_llm_batch_size', 5))
+    _rows_per_llm_batch = _products_per_batch_range * _rpp_range
+    total_batches = max(1, math.ceil(sheet.total_rows / _rows_per_llm_batch))
 
     if not st.session_state.excel_start_batch or st.session_state.excel_start_batch < 1 or st.session_state.excel_start_batch > total_batches:
         st.session_state.excel_start_batch = 1
@@ -2993,7 +2991,7 @@ def render_excel_extraction_view():
 
     st.markdown("**⚙️ Batch Range**")
     st.caption(
-        f"Total: {total_batches} batch(es) — {_rpp_range} row(s) per product")
+        f"Total: {total_batches} batch(es) — {_products_per_batch_range} product(s) × {_rpp_range} row(s) = {_rows_per_llm_batch} rows per batch")
     col_row1, col_row2 = st.columns(2)
     with col_row1:
         new_start_batch = st.number_input(
@@ -3017,8 +3015,9 @@ def render_excel_extraction_view():
     # Convert selected batch range to Excel-absolute row numbers
     start_batch = st.session_state.excel_start_batch
     end_batch = st.session_state.excel_end_batch
-    start_row = excel_first + (start_batch - 1) * _rpp_range
-    end_row = min(excel_first + end_batch * _rpp_range - 1, excel_last)
+    start_row = excel_first + (start_batch - 1) * _rows_per_llm_batch
+    end_row = min(excel_first + end_batch *
+                  _rows_per_llm_batch - 1, excel_last)
 
     st.checkbox(
         "🖼️ Include Images",
@@ -3026,10 +3025,6 @@ def render_excel_extraction_view():
         help="Include product images (may slow down extraction)",
         key="excel_include_images"
     )
-
-    st.info("🧠 **LLM mode** sends rows in batches to the AI. Slower but fully flexible — "
-            "hints like *\"apply discount to price\"*, *\"merge multi-row products\"*, etc. all work. "
-            "Configure hints in **Schema** settings.")
 
     # LLM options
     with st.expander("⚙️ LLM Options", expanded=True):
@@ -3105,13 +3100,15 @@ def render_excel_extraction_view():
     if not st.session_state.excel_products:
         st.info("No products extracted yet. Click **Extract Products** to start.")
     else:
-        # Show first 50
-        for idx, product in enumerate(st.session_state.excel_products[:50]):
+        # Show the last 50 so newly extracted products are always visible
+        all_products = st.session_state.excel_products
+        preview_products = all_products[-50:]
+        for idx, product in enumerate(preview_products):
             render_excel_product_card(product, idx)
 
-        if len(st.session_state.excel_products) > 50:
+        if len(all_products) > 50:
             st.caption(
-                f"Showing first 50 of {len(st.session_state.excel_products)} products.")
+                f"Showing last 50 of {len(all_products)} products. All products are visible in the Review tab.")
 
 
 def render_excel_product_card(product: Product, idx: int):
@@ -3130,8 +3127,8 @@ def render_excel_product_card(product: Product, idx: int):
         if has_image:
             col_img, col_fields = st.columns([1, 3])
             with col_img:
-                # Lazy load image only when button clicked
-                show_image_key = f"show_img_{idx}"
+                # Use product_id as key so the flag works in both extraction and review tabs
+                show_image_key = f"show_img_{product.product_id}"
                 if show_image_key not in st.session_state:
                     st.session_state[show_image_key] = False
 
@@ -3372,8 +3369,9 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
     import json as _json
     from src.schemas import Product, Price, Currency
 
-    # Clear existing products
-    st.session_state.excel_products = []
+    # Keep existing products — new extraction appends to them
+    if 'excel_products' not in st.session_state:
+        st.session_state.excel_products = []
 
     extractor = LLMExtractor(model=LLM_EXCEL_MODEL)
     schema_fields = st.session_state.get(
@@ -3394,9 +3392,9 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
     total_rows = len(all_rows)
     num_batches = (total_rows + batch_size - 1) // batch_size
 
-    with st.status(f"🧠 Extracting with LLM ({num_batches} batches)...", expanded=True) as status:
+    with st.status(f"🧠 Extracting rows {start_row}–{end_row} ({total_rows} rows, {num_batches} LLM calls)...", expanded=True) as status:
         progress_bar = st.progress(
-            0, text=f"Processing batch 0/{num_batches}...")
+            0, text=f"Rows {start_row}–{end_row} | LLM call 0/{num_batches}...")
         total_products = 0
 
         for batch_idx in range(num_batches):
@@ -3415,7 +3413,7 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
             data_text = "\n".join(row_lines)
 
             st.text(
-                f"Batch {batch_idx + 1}/{num_batches}: Excel rows {start_row + batch_start}-{start_row + batch_end - 1}")
+                f"LLM call {batch_idx + 1}/{num_batches} → Excel rows {start_row + batch_start}–{start_row + batch_end - 1}")
 
             try:
                 # Call LLM with full schema context
@@ -3555,7 +3553,7 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
             # Update progress
             progress = (batch_idx + 1) / num_batches
             progress_bar.progress(
-                progress, text=f"Processed batch {batch_idx + 1}/{num_batches} ({total_products} products)")
+                progress, text=f"LLM call {batch_idx + 1}/{num_batches} — {total_products} products so far (rows {start_row}–{start_row + batch_end - 1})")
 
         progress_bar.progress(
             1.0, text=f"✅ Done: {total_products} products extracted!")
@@ -3574,6 +3572,11 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
             label_text = f"✅ Extracted {total_products} products from {total_rows} rows"
 
         status.update(label=label_text, state="complete")
+
+    # Pre-set show_img flags so images render immediately without "Load Image" button
+    for product in st.session_state.excel_products:
+        if getattr(product, 'excel_image', None) is not None:
+            st.session_state[f"show_img_{product.product_id}"] = True
 
     st.rerun()
 
