@@ -2608,7 +2608,8 @@ def check_password() -> bool:
     if st.session_state.get("authenticated"):
         return True
 
-    st.title("🔐 Login")
+    st.title("BoB Master Expert")
+    st.markdown("##### 🔐 Login")
     password = st.text_input("Password", type="password", key="password_input")
     if st.button("Login"):
         if password == st.secrets.get("APP_PASSWORD", ""):
