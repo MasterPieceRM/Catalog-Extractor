@@ -2608,8 +2608,25 @@ def get_excel_schema_prompt():
     return "\n".join(prompt_parts)
 
 
+def check_password() -> bool:
+    """Show a password gate. Returns True if the user is authenticated."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.title("🔐 Login")
+    password = st.text_input("Password", type="password", key="password_input")
+    if st.button("Login"):
+        if password == st.secrets.get("APP_PASSWORD", ""):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password. Please try again.")
+    st.stop()
+
+
 def main():
     """Main application entry point"""
+    check_password()
     init_session_state()
 
     # Render sidebar (contains mode selector)
