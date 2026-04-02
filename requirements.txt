@@ -22,3 +22,6 @@ xlrd
 
 # Background removal
 rembg>=2.0.0
+
+# Web search
+ddgs>=9.0.0

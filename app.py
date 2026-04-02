@@ -301,11 +301,6 @@ def render_pdf_sidebar_content():
                     st.session_state.run_vision_extraction = False
                 st.info(f"New file loaded: {uploaded_file.name}")
 
-            # Show vision mode status
-            if LLM_VISION_ENABLED:
-                st.success("🖼️ Vision Mode: ON")
-                st.caption("AI will analyze page images directly")
-
             if st.button("🔄 Load/Reload PDF", width='stretch'):
                 with st.spinner("Loading PDF..."):
                     st.session_state.pdf_doc = processor.extract_all_pages(
@@ -361,7 +356,7 @@ def render_extraction_view():
         1. Upload a PDF catalog using the sidebar
         2. Click "Load/Reload PDF" to process it
         3. Go to **Schema** view to configure what fields to extract
-        4. Come back here to extract products from each page
+        4. Go to **Extraction** view to extract products from each page
         """)
         return
 
@@ -2608,15 +2603,46 @@ def check_password() -> bool:
     if st.session_state.get("authenticated"):
         return True
 
-    st.title("BoB Master Expert")
-    st.markdown("##### 🔐 Login")
-    password = st.text_input("Password", type="password", key="password_input")
-    if st.button("Login"):
-        if password == st.secrets.get("APP_PASSWORD", ""):
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password. Please try again.")
+    st.markdown(
+        """
+        <style>
+        .login-container {
+            max-width: 360px;
+            margin: 8rem auto 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+        .login-container h1 {
+            font-size: 2rem;
+            margin-bottom: 0.25rem;
+        }
+        .login-container h5 {
+            margin-bottom: 1.5rem;
+        }
+        </style>
+        <div class="login-container">
+            <h1>BoB Master Expert</h1>
+            <h5>🔐 Login</h5>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        with st.form("login_form"):
+            password = st.text_input(
+                "Password", type="password", key="password_input")
+            submitted = st.form_submit_button(
+                "Login", use_container_width=True)
+            if submitted:
+                if password == st.secrets.get("APP_PASSWORD", ""):
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password. Please try again.")
     st.stop()
 
 
@@ -2817,7 +2843,14 @@ def render_excel_sidebar_content():
 def render_excel_extraction_view():
     """Render the Excel extraction view"""
     if not st.session_state.excel_doc:
-        st.info("👆 Upload an Excel file and click **Load/Reload Excel** to get started")
+        st.info("👆 Upload an Excel file to get started")
+        st.markdown("""
+        **Getting Started:**
+        1. Upload an Excel file using the sidebar
+        2. Click "Load/Reload Excel" to process it
+        3. Go to **Schema** view to configure what fields to extract
+        4. Go to **Extraction** view to extract products from each batch of rows
+        """)
         return
 
     sheet_name = st.session_state.excel_current_sheet
