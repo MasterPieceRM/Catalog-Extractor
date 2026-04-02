@@ -1465,12 +1465,9 @@ def render_export_view():
     schema_fields = st.session_state.get(
         'schema_fields', DEFAULT_SCHEMA_FIELDS)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        include_reviewed_only = st.checkbox(
-            "Export reviewed only", value=False)
-    with col2:
-        include_page_info = st.checkbox("Include page number", value=True)
+    include_reviewed_only = st.checkbox(
+        "Export reviewed only", value=False)
+    include_page_info = False
 
     # Filter products
     products_to_export = st.session_state.products
@@ -3710,13 +3707,9 @@ def render_excel_export_view():
     schema_fields = st.session_state.get(
         'schema_fields', DEFAULT_SCHEMA_FIELDS)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        include_reviewed_only = st.checkbox(
-            "Export reviewed only", value=False, key="excel_export_reviewed")
-    with col2:
-        include_row_info = st.checkbox(
-            "Include row number", value=True, key="excel_export_row_info")
+    include_reviewed_only = st.checkbox(
+        "Export reviewed only", value=False, key="excel_export_reviewed")
+    include_row_info = False
 
     include_images = st.checkbox("📷 Include product images", value=True, key="excel_export_images",
                                  help="Embed images in the exported Excel file (may increase file size)")
