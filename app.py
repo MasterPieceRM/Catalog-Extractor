@@ -2379,57 +2379,6 @@ def render_schema_config():
 
     st.divider()
 
-    # Quick add common fields
-    st.markdown("### Quick Add Common Fields")
-
-    common_fields = [
-        {"name": "size", "type": "text", "description": "Product size", "hint": ""},
-        {"name": "color", "type": "text", "description": "Product color", "hint": ""},
-        {"name": "weight", "type": "text",
-            "description": "Product weight", "hint": ""},
-        {"name": "dimensions", "type": "text",
-            "description": "Product dimensions", "hint": ""},
-        {"name": "material", "type": "text",
-            "description": "Product material", "hint": ""},
-        {"name": "quantity", "type": "number",
-            "description": "Available quantity", "hint": ""},
-        {"name": "unit_price", "type": "number",
-            "description": "Price per unit", "hint": ""},
-        {"name": "ean", "type": "text", "description": "EAN/Barcode", "hint": ""},
-        {"name": "manufacturer", "type": "text",
-            "description": "Manufacturer name", "hint": ""},
-        {"name": "model", "type": "text", "description": "Model number", "hint": ""},
-        {"name": "style", "type": "text",
-            "description": "Style name/number", "hint": ""},
-        {"name": "wholesale_price", "type": "number",
-            "description": "Wholesale price", "hint": ""},
-        {"name": "retail_price", "type": "number",
-            "description": "Retail/MSRP price", "hint": ""},
-        {"name": "upc", "type": "text", "description": "UPC code", "hint": ""},
-    ]
-
-    existing_names = [f['name'].lower()
-                      for f in st.session_state.schema_fields]
-    available_fields = [
-        f for f in common_fields if f['name'].lower() not in existing_names]
-
-    if available_fields:
-        cols = st.columns(5)
-        for idx, field in enumerate(available_fields[:15]):
-            with cols[idx % 5]:
-                if st.button(f"+ {field['name']}", key=f"quick_add_{field['name']}"):
-                    st.session_state.schema_fields.append({
-                        **field,
-                        "required": False,
-                        "hint": "",
-                        "formula": ""
-                    })
-                    st.rerun()
-    else:
-        st.info("All common fields already added")
-
-    st.divider()
-
     # Reset to defaults
     if st.button("🔄 Reset to Defaults"):
         st.session_state.schema_fields = [
