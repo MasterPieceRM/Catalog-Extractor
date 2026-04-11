@@ -2035,7 +2035,8 @@ def render_schema_config():
                                             with col:
                                                 try:
                                                     img_bytes = image_store.get_image_bytes(
-                                                        meta.sheet_name, meta.index)
+                                                        meta.sheet_name, meta.index,
+                                                        zip_path=getattr(meta, 'zip_path', ''))
                                                     if img_bytes:
                                                         st.image(
                                                             img_bytes, caption=f"Row {meta.row + 1}")
@@ -2944,7 +2945,8 @@ def render_excel_extraction_view():
                                 with col:
                                     try:
                                         img_bytes = image_store.get_image_bytes(
-                                            meta.sheet_name, meta.index)
+                                            meta.sheet_name, meta.index,
+                                            zip_path=getattr(meta, 'zip_path', ''))
                                         if img_bytes:
                                             st.image(
                                                 img_bytes, caption=f"Row {meta.row + 1}")
@@ -3504,7 +3506,8 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                                     openpyxl_row)
                                 if meta:
                                     b64 = image_store.get_image_base64(
-                                        meta.sheet_name, meta.index)
+                                        meta.sheet_name, meta.index,
+                                        zip_path=getattr(meta, 'zip_path', ''))
                                     if b64:
                                         product.excel_image = b64
                                         image_found = True
@@ -3525,7 +3528,8 @@ def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int
                                     openpyxl_row)
                                 if meta:
                                     b64 = image_store.get_image_base64(
-                                        meta.sheet_name, meta.index)
+                                        meta.sheet_name, meta.index,
+                                        zip_path=getattr(meta, 'zip_path', ''))
                                     if b64:
                                         product.excel_image = b64
                                     break

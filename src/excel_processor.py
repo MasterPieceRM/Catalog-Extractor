@@ -6,6 +6,9 @@ import io
 import re
 import base64
 import logging
+import posixpath
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Generator, Tuple
 from dataclasses import dataclass, field
@@ -20,13 +23,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExcelImageMeta:
     """Lightweight image metadata — no pixel data stored here"""
-    index: int        # Index into the worksheet's _images list
+    index: int        # Index into the worksheet's _images list (-1 for zip-path images)
     sheet_name: str   # Which sheet this image belongs to
     row: int          # 0-indexed row where image is anchored
     col: int          # 0-indexed column where image is anchored
     format: str       # Image format (png, jpeg, etc.)
     width: int = 0
     height: int = 0
+    zip_path: str = ""  # Direct zip entry path (for shape-embedded images openpyxl misses)
 
 
 class ExcelImageStore:
@@ -38,20 +42,47 @@ class ExcelImageStore:
 
     def __init__(self, file_bytes: bytes):
         self._file_bytes = file_bytes
-        # (sheet, index) -> bytes
-        self._cache: Dict[Tuple[str, int], bytes] = {}
+        self._cache: Dict[tuple, bytes] = {}
         self._cache_max = 50  # Keep at most 50 images in memory
-        self._cache_order: List[Tuple[str, int]] = []
+        self._cache_order: List[tuple] = []
 
-    def get_image_bytes(self, sheet_name: str, image_index: int) -> Optional[bytes]:
-        """Get raw image bytes for a specific image, loading lazily"""
+    def _cache_put(self, key: tuple, data: bytes):
+        """Insert bytes into LRU cache with eviction."""
+        self._cache[key] = data
+        self._cache_order.append(key)
+        if len(self._cache_order) > self._cache_max:
+            evict_key = self._cache_order.pop(0)
+            self._cache.pop(evict_key, None)
+
+    def get_image_bytes_by_zippath(self, zip_path: str) -> Optional[bytes]:
+        """Read image bytes directly from the xlsx ZIP entry (for shape-embedded images)."""
+        cache_key = ('zip', zip_path)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        try:
+            with zipfile.ZipFile(io.BytesIO(self._file_bytes)) as z:
+                data = z.read(zip_path)
+            self._cache_put(cache_key, data)
+            return data
+        except Exception as e:
+            logger.warning(f"Failed to load image from zip path {zip_path}: {e}")
+            return None
+
+    def get_image_base64_by_zippath(self, zip_path: str) -> Optional[str]:
+        data = self.get_image_bytes_by_zippath(zip_path)
+        return base64.b64encode(data).decode('utf-8') if data else None
+
+    def get_image_bytes(self, sheet_name: str, image_index: int, zip_path: str = "") -> Optional[bytes]:
+        """Get raw image bytes for a specific image, loading lazily.
+        If zip_path is provided (shape-embedded images), reads directly from ZIP.
+        """
+        if zip_path:
+            return self.get_image_bytes_by_zippath(zip_path)
+
         cache_key = (sheet_name, image_index)
-
-        # Check cache first
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        # Load from workbook
         try:
             wb = load_workbook(io.BytesIO(self._file_bytes), data_only=True)
             ws = wb[sheet_name]
@@ -60,14 +91,7 @@ class ExcelImageStore:
                 img = ws._images[image_index]
                 data = img._data()
                 wb.close()
-
-                # Cache with eviction
-                self._cache[cache_key] = data
-                self._cache_order.append(cache_key)
-                if len(self._cache_order) > self._cache_max:
-                    evict_key = self._cache_order.pop(0)
-                    self._cache.pop(evict_key, None)
-
+                self._cache_put(cache_key, data)
                 return data
 
             wb.close()
@@ -77,9 +101,9 @@ class ExcelImageStore:
 
         return None
 
-    def get_image_base64(self, sheet_name: str, image_index: int) -> Optional[str]:
+    def get_image_base64(self, sheet_name: str, image_index: int, zip_path: str = "") -> Optional[str]:
         """Get base64-encoded image string"""
-        data = self.get_image_bytes(sheet_name, image_index)
+        data = self.get_image_bytes(sheet_name, image_index, zip_path=zip_path)
         if data:
             return base64.b64encode(data).decode('utf-8')
         return None
@@ -89,9 +113,15 @@ class ExcelImageStore:
         Batch-preload images for a set of rows into cache.
         Used during export to avoid opening the workbook per-image.
         """
+        # Preload zip-path images directly (fast — single zip entry read each)
+        for meta in image_metas:
+            if meta.sheet_name == sheet_name and meta.row in row_set and meta.zip_path:
+                self.get_image_bytes_by_zippath(meta.zip_path)
+
+        # Preload openpyxl-indexed images in a single workbook open
         indices_to_load = []
         for meta in image_metas:
-            if meta.sheet_name == sheet_name and meta.row in row_set:
+            if meta.sheet_name == sheet_name and meta.row in row_set and not meta.zip_path:
                 cache_key = (sheet_name, meta.index)
                 if cache_key not in self._cache:
                     indices_to_load.append(meta.index)
@@ -109,15 +139,14 @@ class ExcelImageStore:
                         try:
                             data = ws._images[idx]._data()
                             cache_key = (sheet_name, idx)
-                            self._cache[cache_key] = data
-                            self._cache_order.append(cache_key)
+                            self._cache_put(cache_key, data)
                         except Exception as e:
                             logger.warning(
                                 f"Failed to preload image {idx}: {e}")
 
             wb.close()
 
-            # Evict if over limit (keep generous limit during batch preload)
+            # Evict if over limit during batch preload
             while len(self._cache_order) > self._cache_max * 4:
                 evict_key = self._cache_order.pop(0)
                 self._cache.pop(evict_key, None)
@@ -360,6 +389,13 @@ class ExcelProcessor:
 
             # Extract image METADATA only — no pixel data loaded
             image_metas = self._extract_image_metadata(ws, sheet_name)
+
+            # Fallback: if openpyxl found no images, parse drawing XML directly.
+            # This handles shape-embedded images (xdr:sp with blipFill) that openpyxl misses.
+            if not image_metas:
+                image_metas = self._extract_image_metadata_from_drawing_xml(
+                    file_bytes, sheet_name, wb.sheetnames.index(sheet_name))
+
             sheet.image_metas = image_metas
             sheet.build_row_image_index()
 
@@ -417,6 +453,172 @@ class ExcelProcessor:
             logger.warning(f"Failed to extract image metadata: {e}")
 
         logger.info(f"Indexed {len(metas)} image positions from sheet")
+        return metas
+
+    # --- Drawing XML fallback ---
+
+    @staticmethod
+    def _resolve_zip_path(base_entry: str, relative_target: str) -> str:
+        """Resolve a relative path from the perspective of a zip entry."""
+        base_dir = '/'.join(base_entry.split('/')[:-1])
+        return posixpath.normpath(f"{base_dir}/{relative_target}")
+
+    def _get_sheet_file_map(self, file_bytes: bytes) -> Dict[str, str]:
+        """
+        Return {sheet_name: 'xl/worksheets/sheetN.xml'} by parsing
+        xl/workbook.xml and xl/_rels/workbook.xml.rels.
+        """
+        WB_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                wb_root = ET.fromstring(z.read("xl/workbook.xml").decode('utf-8'))
+                name_to_rid: Dict[str, str] = {}
+                for sheet_elem in wb_root.findall(f".//{{{WB_NS}}}sheet"):
+                    name = sheet_elem.get('name')
+                    rid = sheet_elem.get(f'{{{R_NS}}}id')
+                    if name and rid:
+                        name_to_rid[name] = rid
+
+                rels_root = ET.fromstring(z.read("xl/_rels/workbook.xml.rels").decode('utf-8'))
+                rid_to_path: Dict[str, str] = {}
+                for rel in rels_root:
+                    rid = rel.get('Id')
+                    target = rel.get('Target', '')
+                    if rid and 'worksheet' in rel.get('Type', '').lower():
+                        # target is relative to xl/, e.g. "worksheets/sheet1.xml"
+                        full = f"xl/{target}" if not target.startswith('xl/') else target
+                        rid_to_path[rid] = full
+
+                return {name: rid_to_path[rid]
+                        for name, rid in name_to_rid.items()
+                        if rid in rid_to_path}
+        except Exception as e:
+            logger.warning(f"Failed to build sheet file map: {e}")
+            return {}
+
+    def _extract_image_metadata_from_drawing_xml(
+            self, file_bytes: bytes, sheet_name: str, sheet_index: int) -> List[ExcelImageMeta]:
+        """
+        Fallback image extraction via raw drawing XML parsing.
+        Handles shapes (<xdr:sp>) with <a:blipFill> that openpyxl's ws._images misses.
+        This is common in files from vendors like Safilo that use linked/embedded
+        shape images instead of standard <xdr:pic> picture elements.
+        """
+        XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+        A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        IMG_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+        DRAWING_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
+
+        ANCHOR_TAGS = {f"{{{XDR}}}twoCellAnchor", f"{{{XDR}}}oneCellAnchor"}
+        FROM_TAG = f"{{{XDR}}}from"
+        ROW_TAG = f"{{{XDR}}}row"
+        COL_TAG = f"{{{XDR}}}col"
+        BLIP_TAG = f"{{{A_NS}}}blip"
+        EMBED_ATTR = f"{{{R_NS}}}embed"
+
+        metas: List[ExcelImageMeta] = []
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                zip_names = set(z.namelist())
+
+                # Locate sheet file: try name map first, fall back to positional
+                sheet_file_map = self._get_sheet_file_map(file_bytes)
+                sheet_file = sheet_file_map.get(sheet_name)
+                if not sheet_file:
+                    # Positional fallback: sheet1.xml, sheet2.xml, ...
+                    sheet_file = f"xl/worksheets/sheet{sheet_index + 1}.xml"
+                    if sheet_file not in zip_names:
+                        logger.warning(f"Sheet file not found for '{sheet_name}'")
+                        return metas
+
+                # Find drawing relationship in sheet rels
+                sheet_basename = sheet_file.split('/')[-1]
+                sheet_dir = '/'.join(sheet_file.split('/')[:-1])
+                sheet_rels_path = f"{sheet_dir}/_rels/{sheet_basename}.rels"
+                if sheet_rels_path not in zip_names:
+                    return metas
+
+                sheet_rels_root = ET.fromstring(z.read(sheet_rels_path).decode('utf-8'))
+                drawing_path = None
+                for rel in sheet_rels_root:
+                    if DRAWING_REL_TYPE in rel.get('Type', ''):
+                        target = rel.get('Target', '')
+                        candidate = self._resolve_zip_path(sheet_file, target)
+                        if candidate in zip_names:
+                            drawing_path = candidate
+                            break
+
+                if not drawing_path:
+                    return metas
+
+                # Build rId → zip media path map from drawing rels
+                drawing_basename = drawing_path.split('/')[-1]
+                drawing_dir = '/'.join(drawing_path.split('/')[:-1])
+                drawing_rels_path = f"{drawing_dir}/_rels/{drawing_basename}.rels"
+                rid_to_zippath: Dict[str, str] = {}
+                if drawing_rels_path in zip_names:
+                    dr_root = ET.fromstring(z.read(drawing_rels_path).decode('utf-8'))
+                    for rel in dr_root:
+                        if IMG_REL_TYPE in rel.get('Type', ''):
+                            rid = rel.get('Id')
+                            target = rel.get('Target', '')
+                            media_path = self._resolve_zip_path(drawing_path, target)
+                            if rid and media_path in zip_names:
+                                rid_to_zippath[rid] = media_path
+
+                if not rid_to_zippath:
+                    return metas
+
+                # Parse drawing XML anchors
+                drawing_root = ET.fromstring(z.read(drawing_path).decode('utf-8'))
+                idx = 0
+                for anchor in drawing_root:
+                    if anchor.tag not in ANCHOR_TAGS:
+                        continue
+
+                    from_elem = anchor.find(FROM_TAG)
+                    if from_elem is None:
+                        continue
+                    row_elem = from_elem.find(ROW_TAG)
+                    col_elem = from_elem.find(COL_TAG)
+                    if row_elem is None or col_elem is None:
+                        continue
+
+                    try:
+                        row = int(row_elem.text or 0)
+                        col = int(col_elem.text or 0)
+                    except (ValueError, TypeError):
+                        continue
+
+                    blip = anchor.find(f'.//{BLIP_TAG}')
+                    if blip is None:
+                        continue
+
+                    rid = blip.get(EMBED_ATTR)
+                    if not rid or rid not in rid_to_zippath:
+                        continue
+
+                    zip_path = rid_to_zippath[rid]
+                    ext = zip_path.rsplit('.', 1)[-1].lower()
+                    fmt = 'jpeg' if ext in ('jpg', 'jpeg') else ext or 'png'
+
+                    metas.append(ExcelImageMeta(
+                        index=idx,
+                        sheet_name=sheet_name,
+                        row=row,
+                        col=col,
+                        format=fmt,
+                        zip_path=zip_path,
+                    ))
+                    idx += 1
+
+        except Exception as e:
+            logger.warning(f"Failed to extract images from drawing XML for '{sheet_name}': {e}")
+
+        logger.info(f"Drawing XML fallback: indexed {len(metas)} images for sheet '{sheet_name}'")
         return metas
 
     def _load_xls_from_bytes(self, file_bytes: bytes, file_name: str,
