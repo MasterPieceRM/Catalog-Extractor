@@ -164,6 +164,67 @@ def evaluate_computed_fields(product, computed_fields: list):
 DEFAULT_PAGE_CONTEXT = ""
 
 
+def evaluate_lookup_fields(product, lookup_fields: list) -> dict:
+    """Resolve cross-sheet lookup fields for a product."""
+    if not lookup_fields:
+        return {}
+
+    excel_doc = st.session_state.get('excel_doc')
+    if not excel_doc:
+        return {lf['name']: '' for lf in lookup_fields}
+
+    cache_key = '_lookup_table_cache'
+    if cache_key not in st.session_state:
+        st.session_state[cache_key] = {}
+    table_cache = st.session_state[cache_key]
+
+    results = {}
+    for lf in lookup_fields:
+        out_name = lf.get('name', '')
+        source_field = lf.get('source_field', '')
+        lookup_sheet = lf.get('lookup_sheet', '')
+        key_col = lf.get('key_col', '')
+        value_col = lf.get('value_col', '')
+
+        if not all([out_name, source_field, lookup_sheet, key_col, value_col]):
+            results[out_name] = ''
+            continue
+
+        source_val = getattr(product, source_field, None)
+        if source_val is None and hasattr(product, 'raw_attributes'):
+            source_val = product.raw_attributes.get(source_field)
+        if source_val is None:
+            results[out_name] = ''
+            continue
+        source_val = str(source_val).strip()
+
+        table_id = f"{lookup_sheet}::{key_col}::{value_col}"
+        if table_id not in table_cache:
+            sheet = excel_doc.get_sheet(lookup_sheet)
+            if not sheet:
+                table_cache[table_id] = {}
+            else:
+                try:
+                    key_idx = sheet.headers.index(key_col) if key_col in sheet.headers else -1
+                    val_idx = sheet.headers.index(value_col) if value_col in sheet.headers else -1
+                    if key_idx == -1 or val_idx == -1:
+                        table_cache[table_id] = {}
+                    else:
+                        tbl = {}
+                        for row in sheet.rows:
+                            k = str(row[key_idx]).strip() if key_idx < len(row) else ''
+                            v = str(row[val_idx]).strip() if val_idx < len(row) else ''
+                            if k and k != 'None':
+                                tbl[k] = v
+                        table_cache[table_id] = tbl
+                except Exception:
+                    table_cache[table_id] = {}
+
+        results[out_name] = table_cache.get(table_id, {}).get(source_val, '')
+
+    return results
+
+
 def init_session_state():
     """Initialize session state variables"""
     defaults = {
@@ -212,6 +273,8 @@ def init_session_state():
         'excel_row_descriptions': [''],
         # Field to auto-merge on after extraction (None = disabled)
         'excel_auto_merge_field': None,
+        # List of dicts: {name, source_field, lookup_sheet, key_col, value_col}
+        'lookup_fields': [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1147,10 +1210,21 @@ def render_product_review_card(product: Product, idx: int):
                 results = evaluate_computed_fields(product, computed_fields)
                 for field in computed_fields:
                     name = field['name']
-                    # Use unique key if creating widgets, but here we just use markdown
                     val = results.get(name, "")
                     st.markdown(
                         f"**{name.replace('_', ' ').title()} (calc):** {val}")
+
+            # Lookup fields preview
+            lookup_fields = st.session_state.get('lookup_fields', [])
+            if lookup_fields:
+                if not computed_fields:
+                    st.markdown("---")
+                st.caption("🔍 Lookup Fields")
+                lookup_results = evaluate_lookup_fields(product, lookup_fields)
+                for lf in lookup_fields:
+                    lname = lf['name']
+                    lval = lookup_results.get(lname, '')
+                    st.markdown(f"**{lname.replace('_', ' ').title()} (lookup):** {lval or 'N/A'}")
 
             # Show any extra raw_attributes not in schema (excluding image_bbox)
             extra_attrs = {k: v for k, v in product.raw_attributes.items()
@@ -1506,6 +1580,14 @@ def render_export_view():
                 excel_exporter = ExcelExporter()
                 export_schema = expand_pivot_fields(
                     schema_fields, products_to_export)
+                # Resolve lookup fields and stamp onto products
+                lookup_fields = st.session_state.get('lookup_fields', [])
+                if lookup_fields:
+                    lookup_schema_extras = [{'name': lf['name'], 'type': 'text', 'hint': ''} for lf in lookup_fields]
+                    for p in products_to_export:
+                        lvals = evaluate_lookup_fields(p, lookup_fields)
+                        p.raw_attributes.update(lvals)
+                    export_schema = export_schema + lookup_schema_extras
                 excel_bytes = excel_exporter.export_products_to_excel(
                     products=products_to_export,
                     schema_fields=export_schema,
@@ -1567,6 +1649,11 @@ def render_export_view():
             if computed_fields:
                 comp_vals = evaluate_computed_fields(p, computed_fields)
                 row.update(comp_vals)
+
+            # Lookup fields
+            lookup_fields = st.session_state.get('lookup_fields', [])
+            if lookup_fields:
+                row.update(evaluate_lookup_fields(p, lookup_fields))
 
             row['page'] = p.page_number + 1
             preview_rows.append(row)
@@ -2337,6 +2424,101 @@ def render_schema_config():
         st.rerun()
 
     st.divider()
+
+    # ===== LOOKUP FIELDS (Excel mode only) =====
+    if st.session_state.app_mode == 'excel':
+        st.markdown("### 🔍 Cross-Sheet Lookup Fields")
+        excel_doc = st.session_state.get('excel_doc')
+        if not excel_doc:
+            st.info("Upload an Excel file first to configure lookups.")
+        else:
+            available_sheets = excel_doc.sheet_names
+            schema_field_names = [f['name'] for f in st.session_state.get('schema_fields', [])]
+            st.caption(
+                "Map an extracted field value to a column in another sheet. "
+                "Example: look up `material_code` by matching `material` against a Materials reference sheet."
+            )
+
+            lookup_fields = st.session_state.get('lookup_fields', [])
+            for l_idx, lf in enumerate(lookup_fields):
+                with st.container():
+                    lc1, lc2, lc3, lc4, lc5, lc6 = st.columns([2, 2, 2, 2, 2, 0.4])
+                    with lc1:
+                        new_lname = st.text_input(
+                            "Output field name", value=lf['name'],
+                            key=f"lf_name_{l_idx}", label_visibility="collapsed",
+                            placeholder="output_field")
+                        if new_lname != lf['name']:
+                            lf['name'] = new_lname.lower().replace(' ', '_')
+                    with lc2:
+                        src_options = schema_field_names or ['']
+                        src_idx = src_options.index(lf['source_field']) if lf['source_field'] in src_options else 0
+                        new_src = st.selectbox(
+                            "Source field", src_options, index=src_idx,
+                            key=f"lf_src_{l_idx}", label_visibility="collapsed")
+                        lf['source_field'] = new_src
+                    with lc3:
+                        sh_idx = available_sheets.index(lf['lookup_sheet']) if lf['lookup_sheet'] in available_sheets else 0
+                        new_sh = st.selectbox(
+                            "Lookup sheet", available_sheets, index=sh_idx,
+                            key=f"lf_sheet_{l_idx}", label_visibility="collapsed")
+                        if new_sh != lf['lookup_sheet']:
+                            lf['lookup_sheet'] = new_sh
+                            lf['key_col'] = ''
+                            lf['value_col'] = ''
+                            st.session_state.pop('_lookup_table_cache', None)
+                    with lc4:
+                        lk_sheet = excel_doc.get_sheet(lf['lookup_sheet'])
+                        lk_headers = lk_sheet.headers if lk_sheet else []
+                        kc_idx = lk_headers.index(lf['key_col']) if lf['key_col'] in lk_headers else 0
+                        new_kc = (
+                            st.selectbox("Key column", lk_headers, index=kc_idx,
+                                         key=f"lf_keycol_{l_idx}", label_visibility="collapsed")
+                            if lk_headers else
+                            st.text_input("Key column", value=lf['key_col'],
+                                          key=f"lf_keycol_{l_idx}", label_visibility="collapsed")
+                        )
+                        if new_kc != lf['key_col']:
+                            lf['key_col'] = new_kc
+                            st.session_state.pop('_lookup_table_cache', None)
+                    with lc5:
+                        vc_idx = lk_headers.index(lf['value_col']) if lf['value_col'] in lk_headers else 0
+                        new_vc = (
+                            st.selectbox("Value column", lk_headers, index=vc_idx,
+                                         key=f"lf_valcol_{l_idx}", label_visibility="collapsed")
+                            if lk_headers else
+                            st.text_input("Value column", value=lf['value_col'],
+                                          key=f"lf_valcol_{l_idx}", label_visibility="collapsed")
+                        )
+                        if new_vc != lf['value_col']:
+                            lf['value_col'] = new_vc
+                            st.session_state.pop('_lookup_table_cache', None)
+                    with lc6:
+                        if st.button("🗑️", key=f"del_lf_{l_idx}", help="Delete lookup"):
+                            st.session_state.lookup_fields.pop(l_idx)
+                            st.session_state.pop('_lookup_table_cache', None)
+                            st.rerun()
+                    st.caption(
+                        f"`{lf.get('source_field','?')}` → match in `{lf.get('lookup_sheet','?')}.{lf.get('key_col','?')}` → return `{lf.get('value_col','?')}`"
+                    )
+                    st.markdown("---")
+
+            if st.button("➕ Add Lookup Field", key="add_lookup_btn"):
+                default_src = schema_field_names[0] if schema_field_names else ''
+                default_sheet = available_sheets[1] if len(available_sheets) > 1 else available_sheets[0]
+                lk_sh = excel_doc.get_sheet(default_sheet)
+                default_key = lk_sh.headers[0] if lk_sh and lk_sh.headers else ''
+                default_val = lk_sh.headers[1] if lk_sh and len(lk_sh.headers) > 1 else default_key
+                st.session_state.lookup_fields.append({
+                    'name': 'lookup_result',
+                    'source_field': default_src,
+                    'lookup_sheet': default_sheet,
+                    'key_col': default_key,
+                    'value_col': default_val,
+                })
+                st.rerun()
+
+        st.divider()
 
     # ===== ADD NEW FIELD =====
     st.markdown("### ➕ Add New Field")
@@ -3695,6 +3877,14 @@ def render_excel_export_view():
                 excel_exporter = ExcelExporter()
                 export_schema = expand_pivot_fields(
                     schema_fields, products_to_export)
+                # Resolve lookup fields and stamp onto products
+                lookup_fields = st.session_state.get('lookup_fields', [])
+                if lookup_fields:
+                    lookup_schema_extras = [{'name': lf['name'], 'type': 'text', 'hint': ''} for lf in lookup_fields]
+                    for p in products_to_export:
+                        lvals = evaluate_lookup_fields(p, lookup_fields)
+                        p.raw_attributes.update(lvals)
+                    export_schema = export_schema + lookup_schema_extras
                 excel_bytes = excel_exporter.export_products_to_excel(
                     products=products_to_export,
                     schema_fields=export_schema,
@@ -3758,6 +3948,11 @@ def render_excel_export_view():
             if computed_fields:
                 comp_vals = evaluate_computed_fields(p, computed_fields)
                 row.update(comp_vals)
+
+            # Lookup fields
+            lookup_fields = st.session_state.get('lookup_fields', [])
+            if lookup_fields:
+                row.update(evaluate_lookup_fields(p, lookup_fields))
 
             row['source_rows'] = ', '.join(
                 map(str, getattr(p, 'source_rows', [])))
