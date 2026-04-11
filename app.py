@@ -1941,14 +1941,17 @@ def render_schema_config():
             if sheet:
                 import pandas as pd
                 with st.expander(f"Preview Data — {sheet_name} ({sheet.total_rows} rows, {len(sheet.headers)} cols)", expanded=True):
-                    preview_size = st.slider(
-                        "Preview rows",
-                        min_value=10,
-                        max_value=min(200, sheet.total_rows),
-                        value=min(50, sheet.total_rows),
-                        step=10,
-                        key="schema_preview_size"
-                    )
+                    if sheet.total_rows > 10:
+                        preview_size = st.slider(
+                            "Preview rows",
+                            min_value=10,
+                            max_value=min(200, sheet.total_rows),
+                            value=min(50, sheet.total_rows),
+                            step=10,
+                            key="schema_preview_size"
+                        )
+                    else:
+                        preview_size = sheet.total_rows
                     cache_key = f"{sheet_name}_{preview_size}_{sheet.total_rows}"
                     if st.session_state.excel_preview_cache_key != cache_key:
                         preview_data = sheet.get_preview(preview_size)
@@ -2817,14 +2820,17 @@ def render_excel_extraction_view():
         import pandas as pd
 
         # Adjustable preview size
-        preview_size = st.slider(
-            "Preview rows",
-            min_value=10,
-            max_value=min(200, sheet.total_rows),
-            value=min(50, sheet.total_rows),
-            step=10,
-            key="excel_preview_size"
-        )
+        if sheet.total_rows > 10:
+            preview_size = st.slider(
+                "Preview rows",
+                min_value=10,
+                max_value=min(200, sheet.total_rows),
+                value=min(50, sheet.total_rows),
+                step=10,
+                key="excel_preview_size"
+            )
+        else:
+            preview_size = sheet.total_rows
 
         # Cache key based on sheet + size
         cache_key = f"{sheet_name}_{preview_size}_{sheet.total_rows}"
