@@ -205,15 +205,19 @@ def evaluate_lookup_fields(product, lookup_fields: list) -> dict:
                 table_cache[table_id] = {}
             else:
                 try:
-                    key_idx = sheet.headers.index(key_col) if key_col in sheet.headers else -1
-                    val_idx = sheet.headers.index(value_col) if value_col in sheet.headers else -1
+                    key_idx = sheet.headers.index(
+                        key_col) if key_col in sheet.headers else -1
+                    val_idx = sheet.headers.index(
+                        value_col) if value_col in sheet.headers else -1
                     if key_idx == -1 or val_idx == -1:
                         table_cache[table_id] = {}
                     else:
                         tbl = {}
                         for row in sheet.rows:
-                            k = str(row[key_idx]).strip() if key_idx < len(row) else ''
-                            v = str(row[val_idx]).strip() if val_idx < len(row) else ''
+                            k = str(row[key_idx]).strip(
+                            ) if key_idx < len(row) else ''
+                            v = str(row[val_idx]).strip(
+                            ) if val_idx < len(row) else ''
                             if k and k != 'None':
                                 tbl[k] = v
                         table_cache[table_id] = tbl
@@ -260,11 +264,21 @@ def init_session_state():
         'excel_products': [],  # Separate from PDF products
         'excel_current_sheet': None,
         'excel_file_hash': None,
+        'excel_file_hash_uploaded': None,  # hash of bytes written to disk
+        'excel_upload_path': None,  # path to saved file on disk
         'excel_header_row': None,  # None=auto-detect, 0=no header, N=specific row
         'excel_start_batch': 1,
         'excel_end_batch': None,
         'excel_view_mode': 'extraction',  # extraction, review, export
         'excel_preview_cache': None,  # Cached preview DataFrame
+        # Excel extraction progress (one batch per rerun for cancellability)
+        'excel_extraction_running': False,
+        'excel_extraction_cancel': False,
+        'excel_extraction_params': None,
+        'excel_extraction_batch_idx': 0,
+        'excel_extraction_num_batches': 0,
+        'excel_extraction_total_rows': 0,
+        'excel_extraction_products_added': 0,
         'excel_preview_cache_key': None,  # Cache key for invalidation
         'excel_include_images': True,  # Whether to extract images with products
         'excel_llm_batch_size': 5,  # Number of products per LLM batch
@@ -364,8 +378,22 @@ def render_pdf_sidebar_content():
                     st.session_state.run_vision_extraction = False
                 st.info(f"New file loaded: {uploaded_file.name}")
 
-            if st.button("🔄 Load/Reload PDF", width='stretch'):
+            if st.button("🔄 Load PDF", width='stretch'):
                 with st.spinner("Loading PDF..."):
+                    # Always clear extraction state so stale results don't persist
+                    st.session_state.products = []
+                    st.session_state.extraction_complete = False
+                    st.session_state.selected_product = None
+                    st.session_state.selected_product_idx = None
+                    st.session_state.processing_status = None
+                    st.session_state.page_products = {}
+                    if 'extraction_success' in st.session_state:
+                        st.session_state.extraction_success = None
+                    if 'extraction_error' in st.session_state:
+                        st.session_state.extraction_error = None
+                    # Save latest uploaded bytes to disk before loading
+                    with open(file_path, 'wb') as f:
+                        f.write(uploaded_file.getvalue())
                     st.session_state.pdf_doc = processor.extract_all_pages(
                         file_path)
                     st.session_state.current_page = 0
@@ -417,7 +445,7 @@ def render_extraction_view():
         st.markdown("""
         **Getting Started:**
         1. Upload a PDF catalog using the sidebar
-        2. Click "Load/Reload PDF" to process it
+        2. Click "Load PDF" to process it
         3. Go to **Schema** view to configure what fields to extract
         4. Go to **Extraction** view to extract products from each page
         """)
@@ -1224,7 +1252,8 @@ def render_product_review_card(product: Product, idx: int):
                 for lf in lookup_fields:
                     lname = lf['name']
                     lval = lookup_results.get(lname, '')
-                    st.markdown(f"**{lname.replace('_', ' ').title()} (lookup):** {lval or 'N/A'}")
+                    st.markdown(
+                        f"**{lname.replace('_', ' ').title()} (lookup):** {lval or 'N/A'}")
 
             # Show any extra raw_attributes not in schema (excluding image_bbox)
             extra_attrs = {k: v for k, v in product.raw_attributes.items()
@@ -1583,7 +1612,8 @@ def render_export_view():
                 # Resolve lookup fields and stamp onto products
                 lookup_fields = st.session_state.get('lookup_fields', [])
                 if lookup_fields:
-                    lookup_schema_extras = [{'name': lf['name'], 'type': 'text', 'hint': ''} for lf in lookup_fields]
+                    lookup_schema_extras = [
+                        {'name': lf['name'], 'type': 'text', 'hint': ''} for lf in lookup_fields]
                     for p in products_to_export:
                         lvals = evaluate_lookup_fields(p, lookup_fields)
                         p.raw_attributes.update(lvals)
@@ -2291,6 +2321,15 @@ def render_schema_config():
     st.caption(
         "For each field, add an extraction hint explaining WHERE and HOW to find the data")
 
+    # Gather current sheet headers for pivot dropdowns (Excel mode only)
+    _pivot_excel_doc = st.session_state.get('excel_doc')
+    _pivot_sheet_name = st.session_state.get('excel_current_sheet')
+    _pivot_headers = []
+    if is_excel_mode and _pivot_excel_doc and _pivot_sheet_name:
+        _pivot_sheet = _pivot_excel_doc.get_sheet(_pivot_sheet_name)
+        if _pivot_sheet:
+            _pivot_headers = _pivot_sheet.headers
+
     for idx, field in enumerate(st.session_state.schema_fields):
         field_name = field['name']
         is_pivot = field.get('type') == 'size_pivot'
@@ -2319,42 +2358,71 @@ def render_schema_config():
                 )
 
             # Extraction hint row
-            hint_value = field.get('hint', '')
-            hint_placeholder = f"How to find '{field_name}' in the catalog..."
-
-            if is_excel_mode:
-                # Excel-specific placeholders
-                if field_name == 'name':
-                    hint_placeholder = "e.g., 'Product name is in column B or C'"
-                elif field_name == 'price':
-                    hint_placeholder = "e.g., 'Wholesale price is in column E, retail in column F'"
-                elif field_name == 'sku':
-                    hint_placeholder = "e.g., 'SKU is in column A, format: XXX-YYYY'"
-                elif field_name == 'color':
-                    hint_placeholder = "e.g., 'Color is in column D, may use abbreviations like BLK=Black'"
+            if is_pivot:
+                # Size pivot: simple "Map to" + column dropdown
+                pm_col1, pm_col2 = st.columns([1, 4])
+                with pm_col1:
+                    st.markdown("**Map to**")
+                with pm_col2:
+                    current_map = field.get('map_col', '')
+                    if _pivot_headers:
+                        map_idx = _pivot_headers.index(current_map) if current_map in _pivot_headers else 0
+                        selected_col = st.selectbox(
+                            "Map to column",
+                            _pivot_headers,
+                            index=map_idx,
+                            key=f"pivot_map_{field_name}",
+                            label_visibility="collapsed"
+                        )
+                        if selected_col != field.get('map_col'):
+                            field['map_col'] = selected_col
+                    else:
+                        no_col = st.text_input(
+                            "Column name",
+                            value=current_map,
+                            key=f"pivot_map_{field_name}",
+                            placeholder="Column header name",
+                            label_visibility="collapsed"
+                        )
+                        if no_col != field.get('map_col'):
+                            field['map_col'] = no_col
             else:
-                # PDF-specific placeholders
-                if field_name == 'name':
-                    hint_placeholder = "e.g., 'Product name is the large bold text above the image'"
-                elif field_name == 'price':
-                    hint_placeholder = "e.g., 'Look for Wholesale price, ignore Retail price. Format: $XX.XX'"
-                elif field_name == 'sku':
-                    hint_placeholder = "e.g., 'SKU is the alphanumeric code starting with the brand prefix'"
-                elif field_name == 'color':
-                    hint_placeholder = "e.g., 'Color appears above wholesale. Use full name, not abbreviation (BLK=Black)'"
+                hint_value = field.get('hint', '')
+                hint_placeholder = f"How to find '{field_name}' in the catalog..."
 
-            new_hint = st.text_area(
-                f"🔍 Extraction Hint for '{field_name}'",
-                value=hint_value,
-                height=68,
-                placeholder=hint_placeholder,
-                key=f"hint_text_{field_name}",
-                label_visibility="collapsed"
-            )
+                if is_excel_mode:
+                    # Excel-specific placeholders
+                    if field_name == 'name':
+                        hint_placeholder = "e.g., 'Product name is in column B or C'"
+                    elif field_name == 'price':
+                        hint_placeholder = "e.g., 'Wholesale price is in column E, retail in column F'"
+                    elif field_name == 'sku':
+                        hint_placeholder = "e.g., 'SKU is in column A, format: XXX-YYYY'"
+                    elif field_name == 'color':
+                        hint_placeholder = "e.g., 'Color is in column D, may use abbreviations like BLK=Black'"
+                else:
+                    # PDF-specific placeholders
+                    if field_name == 'name':
+                        hint_placeholder = "e.g., 'Product name is the large bold text above the image'"
+                    elif field_name == 'price':
+                        hint_placeholder = "e.g., 'Look for Wholesale price, ignore Retail price. Format: $XX.XX'"
+                    elif field_name == 'sku':
+                        hint_placeholder = "e.g., 'SKU is the alphanumeric code starting with the brand prefix'"
+                    elif field_name == 'color':
+                        hint_placeholder = "e.g., 'Color appears above wholesale. Use full name, not abbreviation (BLK=Black)'"
 
-            # Auto-save hint when changed
-            if new_hint != hint_value:
-                field['hint'] = new_hint
+                new_hint = st.text_area(
+                    f"🔍 Extraction Hint for '{field_name}'",
+                    value=hint_value,
+                    height=68,
+                    placeholder=hint_placeholder,
+                    key=f"hint_text_{field_name}",
+                    label_visibility="collapsed"
+                )
+
+                # Auto-save hint when changed
+                if new_hint != hint_value:
+                    field['hint'] = new_hint
 
             st.markdown("---")
 
@@ -2433,7 +2501,8 @@ def render_schema_config():
             st.info("Upload an Excel file first to configure lookups.")
         else:
             available_sheets = excel_doc.sheet_names
-            schema_field_names = [f['name'] for f in st.session_state.get('schema_fields', [])]
+            schema_field_names = [f['name']
+                                  for f in st.session_state.get('schema_fields', [])]
             st.caption(
                 "Map an extracted field value to a column in another sheet. "
                 "Example: look up `material_code` by matching `material` against a Materials reference sheet."
@@ -2442,7 +2511,8 @@ def render_schema_config():
             lookup_fields = st.session_state.get('lookup_fields', [])
             for l_idx, lf in enumerate(lookup_fields):
                 with st.container():
-                    lc1, lc2, lc3, lc4, lc5, lc6 = st.columns([2, 2, 2, 2, 2, 0.4])
+                    lc1, lc2, lc3, lc4, lc5, lc6 = st.columns(
+                        [2, 2, 2, 2, 2, 0.7])
                     with lc1:
                         new_lname = st.text_input(
                             "Output field name", value=lf['name'],
@@ -2452,13 +2522,15 @@ def render_schema_config():
                             lf['name'] = new_lname.lower().replace(' ', '_')
                     with lc2:
                         src_options = schema_field_names or ['']
-                        src_idx = src_options.index(lf['source_field']) if lf['source_field'] in src_options else 0
+                        src_idx = src_options.index(
+                            lf['source_field']) if lf['source_field'] in src_options else 0
                         new_src = st.selectbox(
                             "Source field", src_options, index=src_idx,
                             key=f"lf_src_{l_idx}", label_visibility="collapsed")
                         lf['source_field'] = new_src
                     with lc3:
-                        sh_idx = available_sheets.index(lf['lookup_sheet']) if lf['lookup_sheet'] in available_sheets else 0
+                        sh_idx = available_sheets.index(
+                            lf['lookup_sheet']) if lf['lookup_sheet'] in available_sheets else 0
                         new_sh = st.selectbox(
                             "Lookup sheet", available_sheets, index=sh_idx,
                             key=f"lf_sheet_{l_idx}", label_visibility="collapsed")
@@ -2470,7 +2542,8 @@ def render_schema_config():
                     with lc4:
                         lk_sheet = excel_doc.get_sheet(lf['lookup_sheet'])
                         lk_headers = lk_sheet.headers if lk_sheet else []
-                        kc_idx = lk_headers.index(lf['key_col']) if lf['key_col'] in lk_headers else 0
+                        kc_idx = lk_headers.index(
+                            lf['key_col']) if lf['key_col'] in lk_headers else 0
                         new_kc = (
                             st.selectbox("Key column", lk_headers, index=kc_idx,
                                          key=f"lf_keycol_{l_idx}", label_visibility="collapsed")
@@ -2482,7 +2555,8 @@ def render_schema_config():
                             lf['key_col'] = new_kc
                             st.session_state.pop('_lookup_table_cache', None)
                     with lc5:
-                        vc_idx = lk_headers.index(lf['value_col']) if lf['value_col'] in lk_headers else 0
+                        vc_idx = lk_headers.index(
+                            lf['value_col']) if lf['value_col'] in lk_headers else 0
                         new_vc = (
                             st.selectbox("Value column", lk_headers, index=vc_idx,
                                          key=f"lf_valcol_{l_idx}", label_visibility="collapsed")
@@ -2505,10 +2579,12 @@ def render_schema_config():
 
             if st.button("➕ Add Lookup Field", key="add_lookup_btn"):
                 default_src = schema_field_names[0] if schema_field_names else ''
-                default_sheet = available_sheets[1] if len(available_sheets) > 1 else available_sheets[0]
+                default_sheet = available_sheets[1] if len(
+                    available_sheets) > 1 else available_sheets[0]
                 lk_sh = excel_doc.get_sheet(default_sheet)
                 default_key = lk_sh.headers[0] if lk_sh and lk_sh.headers else ''
-                default_val = lk_sh.headers[1] if lk_sh and len(lk_sh.headers) > 1 else default_key
+                default_val = lk_sh.headers[1] if lk_sh and len(
+                    lk_sh.headers) > 1 else default_key
                 st.session_state.lookup_fields.append({
                     'name': 'lookup_result',
                     'source_field': default_src,
@@ -2819,6 +2895,10 @@ def render_excel_main_content():
     else:
         render_excel_extraction_view()
 
+    # Tick extraction after rendering so the UI (cancel button + progress) appears first
+    if st.session_state.get('excel_extraction_running'):
+        _tick_excel_extraction()
+
 
 def render_excel_sidebar_content():
     """Render Excel-specific sidebar content"""
@@ -2833,6 +2913,17 @@ def render_excel_sidebar_content():
         )
 
         if uploaded_file:
+            # Save to UPLOAD_DIR when a genuinely new file is uploaded
+            import hashlib
+            _upload_bytes = uploaded_file.getvalue()
+            _upload_hash = hashlib.md5(_upload_bytes).hexdigest()
+            if _upload_hash != st.session_state.get('excel_file_hash_uploaded'):
+                _upload_path = UPLOAD_DIR / uploaded_file.name
+                with open(_upload_path, 'wb') as _f:
+                    _f.write(_upload_bytes)
+                st.session_state.excel_file_hash_uploaded = _upload_hash
+                st.session_state.excel_upload_path = str(_upload_path)
+
             # Header row selector — always available so user can change and reload
             st.markdown("##### 📋 Header Row")
             header_options = ["Auto-detect", "No header", "Specific row"]
@@ -2871,9 +2962,17 @@ def render_excel_sidebar_content():
                 st.session_state.excel_header_row = new_header_row
 
             # Load/Reload button
-            if st.button("🔄 Load/Reload Excel", width='stretch'):
+            if st.button("🔄 Load Excel", width='stretch'):
+                # Read from disk so external modifications are picked up
+                _disk_path = st.session_state.get('excel_upload_path')
+                if _disk_path and Path(_disk_path).exists():
+                    file_bytes = Path(_disk_path).read_bytes()
+                    file_name = Path(_disk_path).name
+                else:
+                    file_bytes = uploaded_file.getvalue()
+                    file_name = uploaded_file.name
+
                 import hashlib
-                file_bytes = uploaded_file.getvalue()
                 new_hash = hashlib.md5(file_bytes).hexdigest()
 
                 # Reset Excel state (keep header_row — user's choice should persist)
@@ -2891,7 +2990,7 @@ def render_excel_sidebar_content():
                     try:
                         processor = ExcelProcessor()
                         st.session_state.excel_doc = processor.load_excel_from_bytes(
-                            file_bytes, uploaded_file.name,
+                            file_bytes, file_name,
                             header_row=st.session_state.get('excel_header_row')
                         )
                         # Set default sheet
@@ -2979,11 +3078,31 @@ def render_excel_extraction_view():
         st.markdown("""
         **Getting Started:**
         1. Upload an Excel file using the sidebar
-        2. Click "Load/Reload Excel" to process it
+        2. Click "Load Excel" to process it
         3. Go to **Schema** view to configure what fields to extract
         4. Go to **Extraction** view to extract products from each batch of rows
         """)
         return
+
+    # ── Extraction progress banner ──────────────────────────────────────────
+    if st.session_state.get('excel_extraction_running'):
+        batch_idx = st.session_state.excel_extraction_batch_idx
+        num_batches = st.session_state.excel_extraction_num_batches
+        products_added = st.session_state.excel_extraction_products_added
+        progress = batch_idx / max(1, num_batches)
+
+        prog_col, cancel_col = st.columns([5, 1])
+        with prog_col:
+            st.progress(
+                progress,
+                text=f"🧠 Extracting… batch {batch_idx}/{num_batches} | {products_added} products so far"
+            )
+        with cancel_col:
+            if st.button("⏹️ Cancel", type="secondary", key="cancel_excel_extraction"):
+                st.session_state.excel_extraction_running = False
+                st.session_state.excel_extraction_cancel = True
+                st.rerun()
+        st.divider()
 
     sheet_name = st.session_state.excel_current_sheet
     sheet = st.session_state.excel_doc.get_sheet(sheet_name)
@@ -3244,10 +3363,12 @@ def render_excel_extraction_view():
         _products_per_batch = min(st.session_state.get(
             'excel_llm_batch_size', 5), _max_products_btn)
         _rows_per_batch = _products_per_batch * _rpp_btn
+        _extraction_running = st.session_state.get('excel_extraction_running', False)
         if st.button(
             f"🧠 Extract batches {start_batch}-{end_batch} with LLM",
             type="primary",
             key="llm_extract_btn",
+            disabled=_extraction_running,
             help=f"Send {end_batch - start_batch + 1} batch(es) ({end_row - start_row + 1} rows) in groups of {_products_per_batch} products to the AI"
         ):
             do_llm_excel_extraction(
@@ -3535,222 +3656,213 @@ def render_product_fields(product: Product, idx: int):
 
 
 def do_llm_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int = 20, include_images: bool = True):
-    """Extract products by sending row batches to the LLM with full schema/hints context."""
-    import json as _json
-    from src.schemas import Product, Price, Currency
+    """Start a cancellable extraction by setting up state and triggering the first rerun."""
+    _start_excel_extraction(sheet, start_row, end_row, batch_size, include_images)
 
-    # Keep existing products — new extraction appends to them
+
+def _start_excel_extraction(sheet, start_row: int, end_row: int, batch_size: int, include_images: bool):
+    """Initialize extraction session state and trigger batch loop via st.rerun()."""
+    data_start = start_row - sheet.data_start_excel_row
+    data_end = end_row - sheet.data_start_excel_row + 1
+    total_rows = max(0, data_end - data_start)
+    num_batches = max(1, (total_rows + batch_size - 1) // batch_size)
+
+    st.session_state.excel_extraction_running = True
+    st.session_state.excel_extraction_cancel = False
+    st.session_state.excel_extraction_params = {
+        'sheet_name': sheet.name,
+        'start_row': start_row,
+        'end_row': end_row,
+        'batch_size': batch_size,
+        'include_images': include_images,
+    }
+    st.session_state.excel_extraction_batch_idx = 0
+    st.session_state.excel_extraction_num_batches = num_batches
+    st.session_state.excel_extraction_total_rows = total_rows
+    st.session_state.excel_extraction_products_added = 0
+    st.rerun()
+
+
+def _tick_excel_extraction():
+    """Run one LLM batch for the ongoing extraction. Called once per script rerun."""
+    import json as _json
+
+    if not st.session_state.get('excel_extraction_running'):
+        return
+
+    params = st.session_state.get('excel_extraction_params')
+    if not params:
+        st.session_state.excel_extraction_running = False
+        return
+
+    sheet_name = params['sheet_name']
+    start_row = params['start_row']
+    end_row = params['end_row']
+    batch_size = params['batch_size']
+    include_images = params['include_images']
+    batch_idx = st.session_state.excel_extraction_batch_idx
+    num_batches = st.session_state.excel_extraction_num_batches
+
+    excel_doc = st.session_state.get('excel_doc')
+    if not excel_doc:
+        st.session_state.excel_extraction_running = False
+        return
+    sheet = excel_doc.get_sheet(sheet_name)
+    if not sheet:
+        st.session_state.excel_extraction_running = False
+        return
+
     if 'excel_products' not in st.session_state:
         st.session_state.excel_products = []
 
     extractor = LLMExtractor(model=LLM_EXCEL_MODEL)
-    schema_fields = st.session_state.get(
-        'schema_fields', DEFAULT_SCHEMA_FIELDS)
+    schema_fields = st.session_state.get('schema_fields', DEFAULT_SCHEMA_FIELDS)
     rows_per_product = st.session_state.get('excel_rows_per_product', 1)
     row_descriptions = st.session_state.get('excel_row_descriptions', [''])
 
-    # Build image index if needed
     image_store = None
     if include_images:
-        image_store = getattr(st.session_state.excel_doc, 'image_store', None)
+        image_store = getattr(excel_doc, 'image_store', None)
         sheet.build_row_image_index()
 
-    # Chunk rows into batches (start_row is Excel-absolute, convert to 0-based data index for slicing)
     data_start = start_row - sheet.data_start_excel_row
     data_end = end_row - sheet.data_start_excel_row + 1
     all_rows = sheet.rows[data_start:data_end]
     total_rows = len(all_rows)
-    num_batches = (total_rows + batch_size - 1) // batch_size
 
-    with st.status(f"🧠 Extracting rows {start_row}–{end_row} ({total_rows} rows, {num_batches} LLM calls)...", expanded=True) as status:
-        progress_bar = st.progress(
-            0, text=f"Rows {start_row}–{end_row} | LLM call 0/{num_batches}...")
-        total_products = 0
+    bs = batch_idx * batch_size
+    be = min(bs + batch_size, total_rows)
+    batch_rows = all_rows[bs:be]
 
-        for batch_idx in range(num_batches):
-            batch_start = batch_idx * batch_size
-            batch_end = min(batch_start + batch_size, total_rows)
-            batch_rows = all_rows[batch_start:batch_end]
+    row_lines = []
+    for i, row in enumerate(batch_rows):
+        excel_row = start_row + bs + i
+        row_dict = {h: v for h, v in zip(sheet.headers, row)}
+        row_lines.append(f"Row {excel_row}: {_json.dumps(row_dict, default=str)}")
+    data_text = "\n".join(row_lines)
 
-            # Format rows as text with actual Excel row numbers
-            row_lines = []
-            for i, row in enumerate(batch_rows):
-                # start_row is already Excel-absolute
-                excel_row = start_row + batch_start + i
-                row_dict = {h: v for h, v in zip(sheet.headers, row)}
-                row_lines.append(
-                    f"Row {excel_row}: {_json.dumps(row_dict, default=str)}")
-            data_text = "\n".join(row_lines)
+    try:
+        products = extractor.extract_products_from_excel(
+            data_text=data_text,
+            batch_num=batch_idx + 1,
+            schema_fields=schema_fields,
+            rows_per_product=rows_per_product,
+            row_descriptions=row_descriptions,
+            headers=sheet.headers,
+        )
 
-            st.text(
-                f"LLM call {batch_idx + 1}/{num_batches} → Excel rows {start_row + batch_start}–{start_row + batch_end - 1}")
+        batch_row_values = []
+        for i, row in enumerate(batch_rows):
+            excel_row = start_row + bs + i
+            vals = set()
+            for v in row:
+                if v is not None:
+                    s = str(v).strip()
+                    if s:
+                        vals.add(s.lower())
+            batch_row_values.append((excel_row, i, vals))
 
-            try:
-                # Call LLM with full schema context
-                products = extractor.extract_products_from_excel(
-                    data_text=data_text,
-                    batch_num=batch_idx + 1,
-                    schema_fields=schema_fields,
-                    rows_per_product=rows_per_product,
-                    row_descriptions=row_descriptions,
-                    headers=sheet.headers,
-                )
+        if include_images and image_store:
+            batch_row_set = {excel_row - 1 for excel_row, _, _ in batch_row_values}
+            image_store.preload_for_rows(sheet.name, sheet.image_metas, batch_row_set)
 
-                # Build a lookup: for each row in this batch, create a set of
-                # searchable values so we can match products to their source row
-                batch_row_values = []
-                for i, row in enumerate(batch_rows):
-                    excel_row = start_row + batch_start + i
-                    # Collect all non-empty string values from this row for matching
-                    vals = set()
-                    for v in row:
-                        if v is not None:
-                            s = str(v).strip()
-                            if s:
-                                vals.add(s.lower())
-                    batch_row_values.append((excel_row, i, vals))
+        batch_excel_start = start_row + bs
+        batch_excel_end = start_row + be - 1
 
-                # Batch-preload images for all rows in this batch (one workbook open)
-                if include_images and image_store:
-                    batch_row_set = set()
-                    for excel_row, _, _ in batch_row_values:
-                        # Convert to 0-based for preload
-                        batch_row_set.add(excel_row - 1)
-                    image_store.preload_for_rows(
-                        sheet.name, sheet.image_metas, batch_row_set)
+        for prod_idx, product in enumerate(products):
+            matched_row = None
+            match_key = (product.name or '').strip().lower()
+            sku_key = (product.sku or '').strip().lower()
+            if match_key or sku_key:
+                best_score = 0
+                for excel_row, data_idx, row_vals in batch_row_values:
+                    score = 0
+                    if match_key:
+                        for v in row_vals:
+                            if match_key in v or v in match_key:
+                                score += 2
+                                break
+                    if sku_key and sku_key in row_vals:
+                        score += 3
+                    if score > best_score:
+                        best_score = score
+                        matched_row = excel_row
 
-                # Process each product
-                for prod_idx, product in enumerate(products):
-                    # Try to match product to its source row by finding which row
-                    # contains the product's name or SKU
-                    matched_row = None
-                    match_key = (product.name or '').strip().lower()
-                    sku_key = (product.sku or '').strip().lower()
-
-                    if match_key or sku_key:
-                        best_score = 0
-                        for excel_row, data_idx, row_vals in batch_row_values:
-                            score = 0
-                            # Check if product name appears in any cell value
-                            if match_key:
-                                for v in row_vals:
-                                    if match_key in v or v in match_key:
-                                        score += 2
-                                        break
-                            # Check SKU match
-                            if sku_key and sku_key in row_vals:
-                                score += 3
-                            if score > best_score:
-                                best_score = score
-                                matched_row = excel_row
-
-                    # Validate and fix LLM-provided source_rows
-                    # The prompt sends absolute Excel rows (e.g. "Row 20: {...}"),
-                    # but the LLM sometimes returns relative indices (1, 2, 3...)
-                    batch_excel_start = start_row + batch_start
-                    batch_excel_end = start_row + batch_end - 1
-                    if product.source_rows and len(product.source_rows) > 0:
-                        # Check if LLM rows fall within the batch range
-                        in_range = all(
-                            batch_excel_start <= r <= batch_excel_end for r in product.source_rows)
-                        if not in_range:
-                            # Try interpreting as 1-based relative indices within the batch
-                            offset_rows = [batch_excel_start +
-                                           (r - 1) for r in product.source_rows]
-                            if all(batch_excel_start <= r <= batch_excel_end for r in offset_rows):
-                                product.source_rows = offset_rows
-                            else:
-                                # Can't salvage — discard and let matching handle it
-                                product.source_rows = []
-
-                    # Set source_rows: prefer validated LLM-provided, then matched, then fallback
-                    if product.source_rows and len(product.source_rows) > 0:
-                        # LLM provided valid source_rows — keep them
-                        if matched_row and matched_row not in product.source_rows:
-                            product.source_rows.insert(0, matched_row)
-                    elif matched_row:
-                        product.source_rows = [matched_row]
+            if product.source_rows and len(product.source_rows) > 0:
+                in_range = all(batch_excel_start <= r <= batch_excel_end for r in product.source_rows)
+                if not in_range:
+                    offset_rows = [batch_excel_start + (r - 1) for r in product.source_rows]
+                    if all(batch_excel_start <= r <= batch_excel_end for r in offset_rows):
+                        product.source_rows = offset_rows
                     else:
-                        # Positional fallback: distribute evenly
-                        rows_per_product = max(
-                            1, len(batch_rows) // max(1, len(products)))
-                        product.source_rows = [
-                            start_row + batch_start + prod_idx * rows_per_product]
+                        product.source_rows = []
 
-                    # Associate image — prefer source_rows, fall back to positional
-                    if include_images and image_store:
-                        image_found = False
-                        # Primary: use the product's actual source_rows (1-based Excel rows)
-                        if product.source_rows:
-                            for src_row in product.source_rows:
-                                openpyxl_row = src_row - 1  # 1-based Excel → 0-based openpyxl
-                                meta = sheet.get_image_meta_for_row(
-                                    openpyxl_row)
-                                if meta:
-                                    b64 = image_store.get_image_base64(
-                                        meta.sheet_name, meta.index,
-                                        zip_path=getattr(meta, 'zip_path', ''))
-                                    if b64:
-                                        product.excel_image = b64
-                                        image_found = True
-                                    break
+            if product.source_rows and len(product.source_rows) > 0:
+                if matched_row and matched_row not in product.source_rows:
+                    product.source_rows.insert(0, matched_row)
+            elif matched_row:
+                product.source_rows = [matched_row]
+            else:
+                _rpp = max(1, len(batch_rows) // max(1, len(products)))
+                product.source_rows = [start_row + bs + prod_idx * _rpp]
 
-                        # Fallback: positional ownership when source_rows didn't yield an image
-                        if not image_found:
-                            rows_per_product = max(
-                                1, len(batch_rows) // max(1, len(products)))
-                            own_start = start_row + batch_start + prod_idx * rows_per_product
-                            own_end = start_row + batch_start + \
-                                (prod_idx + 1) * rows_per_product
-                            if prod_idx == len(products) - 1:
-                                own_end = start_row + batch_end
-                            for r in range(own_start, own_end + 1):
-                                openpyxl_row = r - 1
-                                meta = sheet.get_image_meta_for_row(
-                                    openpyxl_row)
-                                if meta:
-                                    b64 = image_store.get_image_base64(
-                                        meta.sheet_name, meta.index,
-                                        zip_path=getattr(meta, 'zip_path', ''))
-                                    if b64:
-                                        product.excel_image = b64
-                                    break
+            if include_images and image_store:
+                image_found = False
+                if product.source_rows:
+                    for src_row in product.source_rows:
+                        openpyxl_row = src_row - 1
+                        meta = sheet.get_image_meta_for_row(openpyxl_row)
+                        if meta:
+                            b64 = image_store.get_image_base64(
+                                meta.sheet_name, meta.index,
+                                zip_path=getattr(meta, 'zip_path', ''))
+                            if b64:
+                                product.excel_image = b64
+                                image_found = True
+                            break
+                if not image_found:
+                    _rpp = max(1, len(batch_rows) // max(1, len(products)))
+                    own_start = start_row + bs + prod_idx * _rpp
+                    own_end = start_row + bs + (prod_idx + 1) * _rpp
+                    if prod_idx == len(products) - 1:
+                        own_end = start_row + be
+                    for r in range(own_start, own_end + 1):
+                        openpyxl_row = r - 1
+                        meta = sheet.get_image_meta_for_row(openpyxl_row)
+                        if meta:
+                            b64 = image_store.get_image_base64(
+                                meta.sheet_name, meta.index,
+                                zip_path=getattr(meta, 'zip_path', ''))
+                            if b64:
+                                product.excel_image = b64
+                            break
 
-                    st.session_state.excel_products.append(product)
-                    total_products += 1
+            st.session_state.excel_products.append(product)
 
-            except Exception as e:
-                st.warning(f"Batch {batch_idx + 1} failed: {e}")
+        st.session_state.excel_extraction_products_added += len(products)
 
-            # Update progress
-            progress = (batch_idx + 1) / num_batches
-            progress_bar.progress(
-                progress, text=f"LLM call {batch_idx + 1}/{num_batches} — {total_products} products so far (rows {start_row}–{start_row + batch_end - 1})")
+    except Exception as e:
+        st.warning(f"Batch {batch_idx + 1} failed: {e}")
 
-        progress_bar.progress(
-            1.0, text=f"✅ Done: {total_products} products extracted!")
+    # Advance to next batch
+    st.session_state.excel_extraction_batch_idx += 1
 
-        # Auto-merge if configured
+    # Check if fully done
+    if st.session_state.excel_extraction_batch_idx >= num_batches:
+        st.session_state.excel_extraction_running = False
+
         auto_merge_field = st.session_state.get('excel_auto_merge_field')
         if auto_merge_field:
-            before_merge = len(st.session_state.excel_products)
             st.session_state.excel_products = merge_products_by_field(
                 st.session_state.excel_products, auto_merge_field)
-            after_merge = len(st.session_state.excel_products)
-            merged_count = before_merge - after_merge
-            label_text = (
-                f"✅ Extracted {total_products} products → merged {merged_count} duplicate(s) by '{auto_merge_field}' → {after_merge} remaining")
-        else:
-            label_text = f"✅ Extracted {total_products} products from {total_rows} rows"
 
-        status.update(label=label_text, state="complete")
-
-    # Pre-set show_img flags so images render immediately without "Load Image" button
-    for product in st.session_state.excel_products:
-        if getattr(product, 'excel_image', None) is not None:
-            st.session_state[f"show_img_{product.product_id}"] = True
+        for product in st.session_state.excel_products:
+            if getattr(product, 'excel_image', None) is not None:
+                st.session_state[f"show_img_{product.product_id}"] = True
 
     st.rerun()
+
+
 
 
 def render_excel_review_view():
@@ -3880,7 +3992,8 @@ def render_excel_export_view():
                 # Resolve lookup fields and stamp onto products
                 lookup_fields = st.session_state.get('lookup_fields', [])
                 if lookup_fields:
-                    lookup_schema_extras = [{'name': lf['name'], 'type': 'text', 'hint': ''} for lf in lookup_fields]
+                    lookup_schema_extras = [
+                        {'name': lf['name'], 'type': 'text', 'hint': ''} for lf in lookup_fields]
                     for p in products_to_export:
                         lvals = evaluate_lookup_fields(p, lookup_fields)
                         p.raw_attributes.update(lvals)
